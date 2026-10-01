@@ -13,8 +13,15 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 
+ARG TARGETARCH
+
+# The locked torchcodec release has Linux wheels only for x86_64.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --extra torch --extra api --no-editable
+    if [ "$TARGETARCH" = "amd64" ]; then \
+      uv sync --locked --no-dev --extra longform --extra api --no-editable; \
+    else \
+      uv sync --locked --no-dev --extra torch --extra api --no-editable; \
+    fi
 
 EXPOSE 8000
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

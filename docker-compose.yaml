@@ -4,8 +4,10 @@ services:
     environment:
       MODEL_NAME: v3_e2e_rnnt
       DEVICE: cpu
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - gigaam-cache:/root/.cache/gigaam
+      - gigaam-vad-cache:/root/.cache/huggingface
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -22,4 +24,5 @@ services:
 
 volumes:
   gigaam-cache:
+  gigaam-vad-cache:
   voxcpm2-cache:

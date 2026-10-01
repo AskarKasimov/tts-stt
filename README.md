@@ -21,6 +21,17 @@ docker compose up -d --build gigaam
 
 Проверка: `curl http://localhost:8000/health`.
 
+Для записей длиннее 25 секунд есть `POST /transcribe/longform`:
+
+```bash
+curl -X POST 'http://localhost:8000/transcribe/longform?word_timestamps=true' \
+  -F 'file=@long-answer.wav'
+```
+
+Лимит файла — 25 МиБ; ответ содержит текст, сегменты и, по запросу, таймкоды слов.
+Подготовка VAD-весов (`HF_TOKEN`) и поддерживаемые платформы описаны в
+[документации GigaAM](gigaam/README.md#длинные-записи).
+
 По умолчанию выбран `v3_e2e_rnnt`: он возвращает текст с пунктуацией и
 нормализацией, что удобно для диалога с учеником. Если важнее минимальная
 ошибка распознавания без оформления текста, в [оценке авторов](gigaam/evaluation.md)
