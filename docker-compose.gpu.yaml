@@ -1,0 +1,10 @@
+services:
+  gigaam:
+    environment:
+      DEVICE: cuda
+    gpus: all
+
+  voxcpm2:
+    environment:
+      DEVICE: cuda
+    gpus: all

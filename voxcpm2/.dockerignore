@@ -1,0 +1,17 @@
+models/
+data/
+lora/
+output/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.venv-bench/
+tests/
+.DS_Store
+.vscode/
+build/
+dist/

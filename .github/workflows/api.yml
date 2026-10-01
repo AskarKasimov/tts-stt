@@ -1,0 +1,25 @@
+name: HTTP API
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gigaam, voxcpm2]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install HTTP test dependencies
+        run: python -m pip install fastapi uvicorn python-multipart httpx pytest numpy soundfile
+      - name: Check HTTP API without model weights
+        run: python -m pytest -q tests/test_api.py

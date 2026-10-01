@@ -1,0 +1,25 @@
+services:
+  gigaam:
+    build: ./gigaam
+    environment:
+      MODEL_NAME: v3_e2e_rnnt
+      DEVICE: cpu
+    volumes:
+      - gigaam-cache:/root/.cache/gigaam
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+  voxcpm2:
+    build: ./voxcpm2
+    environment:
+      MODEL_ID: openbmb/VoxCPM2
+      DEVICE: cpu
+    volumes:
+      - voxcpm2-cache:/model-cache
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+
+volumes:
+  gigaam-cache:
+  voxcpm2-cache:
