@@ -1,4 +1,4 @@
-"""HTTP adapter for GigaAM short-form and long-form speech recognition."""
+"""HTTP adapter with automatic short-form and long-form speech recognition."""
 
 import asyncio
 import os
@@ -10,31 +10,11 @@ from threading import Lock
 from typing import Callable
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
 
 
 MODEL_NAME = os.getenv("MODEL_NAME", "v3_e2e_rnnt")
 DEVICE = os.getenv("DEVICE", "cpu")
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-
-
-class WordTimestamp(BaseModel):
-    text: str
-    start: float
-    end: float
-
-
-class TranscriptSegment(BaseModel):
-    text: str
-    start: float
-    end: float
-    words: list[WordTimestamp] | None = None
-
-
-class LongformTranscription(BaseModel):
-    text: str
-    model: str
-    segments: list[TranscriptSegment]
 
 
 def load_model():
@@ -59,9 +39,7 @@ def create_app(
     def health():
         return {"status": "ok", "model": MODEL_NAME, "device": DEVICE}
 
-    def transcribe_audio(
-        file: UploadFile, longform: bool = False, word_timestamps: bool = False
-    ):
+    def transcribe_audio(file: UploadFile, word_timestamps: bool = False):
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / "audio"
             size = 0
@@ -75,24 +53,29 @@ def create_app(
             if size == 0:
                 raise HTTPException(422, "Audio file is empty")
 
+            longform = False
             try:
                 with model_lock:
-                    if longform:
+                    try:
+                        result = app.state.model.transcribe(
+                            str(audio_path), word_timestamps=word_timestamps
+                        )
+                    except ValueError as exc:
+                        # GigaAM checks the decoded sample count before inference.
+                        if str(exc) != (
+                            "Too long wav file, use 'transcribe_longform' method."
+                        ):
+                            raise
+                        longform = True
                         result = app.state.model.transcribe_longform(
                             str(audio_path), word_timestamps=word_timestamps
                         )
-                    else:
-                        result = app.state.model.transcribe(str(audio_path))
             except ImportError as exc:
                 if longform:
                     raise HTTPException(
                         503,
                         "Long-form dependencies are unavailable; install the longform extra",
                     ) from exc
-                raise
-            except ValueError as exc:
-                if "Too long wav file" in str(exc):
-                    raise HTTPException(422, "Audio must be at most 25 seconds") from exc
                 raise
             except RuntimeError as exc:
                 if str(exc) == "Failed to load audio":
@@ -107,21 +90,19 @@ def create_app(
             response = {"text": result.text, "model": MODEL_NAME}
             if longform:
                 response["segments"] = [asdict(segment) for segment in result.segments]
+            elif word_timestamps:
+                response["words"] = [asdict(word) for word in result.words or []]
             return response
 
     @app.post("/transcribe")
-    def transcribe(file: UploadFile = File(...)):
-        return transcribe_audio(file)
-
-    @app.post("/transcribe/longform", response_model=LongformTranscription)
-    def transcribe_longform(
+    def transcribe(
         file: UploadFile = File(...),
         word_timestamps: bool = Query(
             False,
             description="Include word timestamps in seconds from the start of the recording",
         ),
     ):
-        return transcribe_audio(file, longform=True, word_timestamps=word_timestamps)
+        return transcribe_audio(file, word_timestamps=word_timestamps)
 
     return app
 

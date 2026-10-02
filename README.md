@@ -21,14 +21,16 @@ docker compose up -d --build gigaam
 
 Проверка: `curl http://localhost:8000/health`.
 
-Для записей длиннее 25 секунд есть `POST /transcribe/longform`:
+`POST /transcribe` автоматически выбирает обработку по длительности: до
+25 секунд — обычное распознавание, длиннее — VAD и longform:
 
 ```bash
-curl -X POST 'http://localhost:8000/transcribe/longform?word_timestamps=true' \
+curl -X POST 'http://localhost:8000/transcribe?word_timestamps=true' \
   -F 'file=@long-answer.wav'
 ```
 
-Лимит файла — 25 МиБ; ответ содержит текст, сегменты и, по запросу, таймкоды слов.
+Лимит файла — 25 МиБ; ответ содержит `text` и `model`, для длинных записей
+также `segments`. По запросу возвращаются таймкоды слов.
 Подготовка VAD-весов (`HF_TOKEN`) и поддерживаемые платформы описаны в
 [документации GigaAM](gigaam/README.md#длинные-записи).
 
@@ -59,8 +61,9 @@ curl -X POST http://localhost:8001/synthesize \
 
 `VoxCPM2` — актуальная модель в линейке VoxCPM с поддержкой русского языка.
 Она выбрана ради качества и возможностей синтеза, а не скорости CPU-инференса.
-Для объяснений до 10 000 символов есть `POST /synthesize/longform`: сервис
-озвучивает текст по частям и возвращает один WAV. Подробности — в
+`POST /synthesize` принимает до 10 000 символов: до 500 символов сервис
+использует обычную генерацию, длиннее — озвучивает текст по частям и возвращает
+один WAV. Подробности — в
 [документации VoxCPM2](voxcpm2/API.md#длинный-текст).
 
 ## Запуск на сервере с NVIDIA GPU

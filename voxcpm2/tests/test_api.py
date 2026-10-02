@@ -65,7 +65,7 @@ def test_longform_synthesizes_all_chunks_into_one_wav(monkeypatch):
     monkeypatch.setattr(api, "_load_model", lambda: model)
     text = "А" * 490 + ". " + "Б" * 20
     response = TestClient(api.app).post(
-        "/synthesize/longform",
+        "/synthesize",
         json={"text": text, "seed": 42, "cfg_value": 3.0, "inference_timesteps": 12},
     )
 
@@ -93,7 +93,7 @@ def test_longform_splits_on_spaces_without_losing_words(monkeypatch):
 
     monkeypatch.setattr(api, "_load_model", RecordingModel)
     text = ("слово " * 120).strip()
-    response = TestClient(api.app).post("/synthesize/longform", json={"text": text})
+    response = TestClient(api.app).post("/synthesize", json={"text": text})
     assert response.status_code == 200
     assert len(chunks) > 1
     assert all(len(chunk) <= 500 for chunk in chunks)
@@ -109,11 +109,9 @@ def test_longform_splits_a_word_longer_than_500_characters(monkeypatch):
             return np.zeros(480, dtype=np.float32)
 
     monkeypatch.setattr(api, "_load_model", RecordingModel)
-    short = TestClient(api.app).post("/synthesize", json={"text": "а" * 501})
     response = TestClient(api.app).post(
-        "/synthesize/longform", json={"text": "а" * 1001}
+        "/synthesize", json={"text": "а" * 1001}
     )
-    assert short.status_code == 422
     assert response.status_code == 200
     assert [len(chunk) for chunk in chunks] == [500, 500, 1]
     assert "".join(chunks) == "а" * 1001
@@ -129,7 +127,7 @@ def test_longform_accepts_exactly_10000_characters(monkeypatch):
 
     monkeypatch.setattr(api, "_load_model", RecordingModel)
     response = TestClient(api.app).post(
-        "/synthesize/longform", json={"text": "а" * 10000}
+        "/synthesize", json={"text": "а" * 10000}
     )
     assert response.status_code == 200
     assert len(chunks) == 20
@@ -142,8 +140,8 @@ def test_longform_rejects_text_over_10000_characters_and_blank_text(monkeypatch)
 
     monkeypatch.setattr(api, "_load_model", unexpected_model_load)
     client = TestClient(api.app)
-    assert client.post("/synthesize/longform", json={"text": "а" * 10001}).status_code == 422
-    assert client.post("/synthesize/longform", json={"text": "  "}).status_code == 422
+    assert client.post("/synthesize", json={"text": "а" * 10001}).status_code == 422
+    assert client.post("/synthesize", json={"text": "  "}).status_code == 422
 
 
 def test_longform_fails_without_returning_partial_audio(monkeypatch):
@@ -159,6 +157,29 @@ def test_longform_fails_without_returning_partial_audio(monkeypatch):
 
     monkeypatch.setattr(api, "_load_model", FailingModel)
     client = TestClient(api.app, raise_server_exceptions=False)
-    response = client.post("/synthesize/longform", json={"text": "а" * 501})
+    response = client.post("/synthesize", json={"text": "а" * 501})
     assert response.status_code == 500
     assert response.headers["content-type"] != "audio/wav"
+
+
+def test_short_text_keeps_whitespace_and_generation_parameters(monkeypatch):
+    model = FakeModel()
+    monkeypatch.setattr(api, "_load_model", lambda: model)
+    text = "а" * 496 + "  б!"
+    response = TestClient(api.app).post(
+        "/synthesize",
+        json={"text": text, "seed": 42, "cfg_value": 3.0, "inference_timesteps": 12},
+    )
+    assert response.status_code == 200
+    assert model.kwargs == {
+        "text": text, "seed": 42, "cfg_value": 3.0, "inference_timesteps": 12
+    }
+    audio, _ = sf.read(io.BytesIO(response.content))
+    assert len(audio) == 480
+
+
+def test_longform_route_is_removed():
+    response = TestClient(api.app).post(
+        "/synthesize/longform", json={"text": "Привет!"}
+    )
+    assert response.status_code == 404

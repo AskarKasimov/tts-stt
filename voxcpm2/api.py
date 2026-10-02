@@ -20,7 +20,7 @@ app = FastAPI(title="VoxCPM2 TTS")
 
 
 class SynthesisRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=500)
+    text: str = Field(min_length=1, max_length=10_000)
     cfg_value: float = Field(default=2.0, ge=0.0, le=5.0)
     inference_timesteps: int = Field(default=10, ge=1, le=50)
     seed: int | None = None
@@ -32,10 +32,6 @@ class SynthesisRequest(BaseModel):
         if not value:
             raise ValueError("text must not be blank")
         return value
-
-
-class LongformSynthesisRequest(SynthesisRequest):
-    text: str = Field(min_length=1, max_length=10_000)
 
 
 def split_text(text: str) -> list[str]:
@@ -82,7 +78,7 @@ def _synthesize(request: SynthesisRequest) -> bytes:
         return output.getvalue()
 
 
-def _synthesize_longform(request: LongformSynthesisRequest) -> bytes:
+def _synthesize_longform(request: SynthesisRequest) -> bytes:
     chunks = split_text(request.text)
     with _model_lock:
         model = _load_model()
@@ -109,11 +105,6 @@ def health():
 
 @app.post("/synthesize", response_class=Response)
 async def synthesize(request: SynthesisRequest):
-    audio = await run_in_threadpool(_synthesize, request)
-    return Response(content=audio, media_type="audio/wav")
-
-
-@app.post("/synthesize/longform", response_class=Response)
-async def synthesize_longform(request: LongformSynthesisRequest):
-    audio = await run_in_threadpool(_synthesize_longform, request)
+    generate = _synthesize if len(request.text) <= MAX_CHUNK_LENGTH else _synthesize_longform
+    audio = await run_in_threadpool(generate, request)
     return Response(content=audio, media_type="audio/wav")
