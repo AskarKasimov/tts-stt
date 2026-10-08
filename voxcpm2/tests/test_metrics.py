@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 
@@ -40,7 +41,7 @@ def test_synthesis_metrics_track_success_validation_longform_and_unavailable(mon
     assert response.content[:4] == b"RIFF"
     after = current(client)
     assert sample_value(after, "speech_requests_total", outcome="success") - before_success == 1
-    assert sample_value(after, "speech_audio_seconds_total", direction="output") - before_audio == 0.01
+    assert sample_value(after, "speech_audio_seconds_total", direction="output") - before_audio == pytest.approx(0.01)
     assert sample_value(after, "speech_text_characters_total") - before_chars == len("Привет")
 
     before = after
@@ -68,7 +69,7 @@ def test_synthesis_metrics_track_success_validation_longform_and_unavailable(mon
     duration_delta = sample_value(
         after, "speech_audio_seconds_total", direction="output"
     ) - sample_value(before, "speech_audio_seconds_total", direction="output")
-    assert duration_delta == (480 + 7200 + 480) / 48000
+    assert duration_delta == pytest.approx((480 + 7200 + 480) / 48000)
     assert sample_value(after, "speech_text_characters_total") - sample_value(
         before, "speech_text_characters_total"
     ) == len(text)
