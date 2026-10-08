@@ -33,6 +33,7 @@ torch = [
 ]
 api = [
     "fastapi",
+    "prometheus-client",
     "uvicorn",
     "python-multipart",
 ]
