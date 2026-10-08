@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: gigaam
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gigaam:8000"]
+  - job_name: voxcpm2
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["voxcpm2:8000"]
