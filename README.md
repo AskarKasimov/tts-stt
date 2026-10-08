@@ -88,7 +88,8 @@ Grafana и Prometheus запускаются вместе с основным Co
 только loopback.
 
 ```bash
-export GRAFANA_ADMIN_PASSWORD='замените-на-секрет'
+cp .env.example .env
+# замените GRAFANA_ADMIN_PASSWORD в .env на настоящий секрет
 docker compose up -d --build
 docker compose ps
 ```
