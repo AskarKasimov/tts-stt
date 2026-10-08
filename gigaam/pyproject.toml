@@ -62,6 +62,17 @@ lint = [
     "types-requests",
 ]
 
+[dependency-groups]
+ci-api = [
+    "fastapi",
+    "httpx",
+    "numpy",
+    "prometheus-client",
+    "pytest",
+    "python-multipart",
+    "soundfile",
+]
+
 [project.urls]
 Homepage = "https://github.com/salute-developers/GigaAM/"
 

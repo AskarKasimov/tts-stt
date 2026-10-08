@@ -1661,6 +1661,19 @@ torch = [
     { name = "torchaudio", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 
+[package.dev-dependencies]
+ci-api = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "prometheus-client" },
+    { name = "pytest" },
+    { name = "python-multipart" },
+    { name = "soundfile" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'lint'", specifier = "==26.1.0" },
@@ -1705,6 +1718,17 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'api'" },
 ]
 provides-extras = ["torch", "api", "longform", "tests", "lint"]
+
+[package.metadata.requires-dev]
+ci-api = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "numpy" },
+    { name = "prometheus-client" },
+    { name = "pytest" },
+    { name = "python-multipart" },
+    { name = "soundfile" },
+]
 
 [[package]]
 name = "googleapis-common-protos"

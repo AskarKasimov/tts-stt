@@ -2678,6 +2678,17 @@ dev = [
     { name = "pytest-cov" },
 ]
 
+[package.dev-dependencies]
+ci-api = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "prometheus-client" },
+    { name = "pytest" },
+    { name = "soundfile" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "addict" },
@@ -2713,6 +2724,16 @@ requires-dist = [
     { name = "wetext" },
 ]
 provides-extras = ["api", "api-test", "dev"]
+
+[package.metadata.requires-dev]
+ci-api = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "numpy" },
+    { name = "prometheus-client" },
+    { name = "pytest" },
+    { name = "soundfile" },
+]
 
 [[package]]
 name = "wetext"
