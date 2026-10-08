@@ -83,13 +83,14 @@ GPU-файл включает `DEVICE=cuda` и доступ к видеокар�
 
 ## Мониторинг нагрузки STT/TTS
 
-Grafana и Prometheus запускаются отдельным overlay. Эти контейнеры не получают
-GPU, Prometheus не публикуется наружу, а Grafana слушает только loopback.
+Grafana и Prometheus запускаются вместе с основным Compose-проектом. Эти
+контейнеры не получают GPU, Prometheus не публикуется наружу, а Grafana слушает
+только loopback.
 
 ```bash
 export GRAFANA_ADMIN_PASSWORD='замените-на-секрет'
-docker compose -f docker-compose.yaml -f docker-compose.observability.yaml up -d --build
-docker compose -f docker-compose.yaml -f docker-compose.observability.yaml ps
+docker compose up -d --build
+docker compose ps
 ```
 
 Grafana доступна на `127.0.0.1:3000`; внешний доступ делайте через SSH-туннель

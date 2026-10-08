@@ -25,7 +25,7 @@ def test_compose_has_loopback_grafana_and_no_gpu_monitoring():
     env = os.environ.copy()
     env["GRAFANA_ADMIN_PASSWORD"] = "test-only"
     result = subprocess.run(
-        ["docker", "compose", "-f", "docker-compose.yaml", "-f", "docker-compose.observability.yaml", "config", "--format", "json"],
+        ["docker", "compose", "-f", "docker-compose.yaml", "config", "--format", "json"],
         cwd=ROOT, env=env, capture_output=True, text=True, check=True,
     )
     compose = json.loads(result.stdout)
