@@ -33,6 +33,7 @@ torch = [
 ]
 api = [
     "fastapi",
+    "prometheus-client",
     "uvicorn",
     "python-multipart",
 ]
@@ -59,6 +60,17 @@ lint = [
     "flake8==7.3.0",
     "mypy",
     "types-requests",
+]
+
+[dependency-groups]
+ci-api = [
+    "fastapi",
+    "httpx",
+    "numpy",
+    "prometheus-client",
+    "pytest",
+    "python-multipart",
+    "soundfile",
 ]
 
 [project.urls]

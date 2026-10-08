@@ -1,13 +1,22 @@
 import io
+import math
 import os
 import re
 import threading
+import time
 
 import soundfile as sf
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 
 MODEL_ID = os.getenv("MODEL_ID", "openbmb/VoxCPM2")
 DEVICE = os.getenv("DEVICE", "cpu")
@@ -17,6 +26,34 @@ _model = None
 _model_lock = threading.Lock()
 
 app = FastAPI(title="VoxCPM2 TTS")
+metrics_registry = CollectorRegistry()
+speech_requests = Counter(
+    "speech_requests_total",
+    "Speech synthesis requests by outcome.",
+    ("outcome",),
+    registry=metrics_registry,
+)
+speech_request_duration = Histogram(
+    "speech_request_duration_seconds",
+    "Speech synthesis request duration in seconds.",
+    registry=metrics_registry,
+)
+speech_audio_seconds = Counter(
+    "speech_audio_seconds_total",
+    "Audio duration produced or consumed in seconds.",
+    ("direction",),
+    registry=metrics_registry,
+)
+speech_audio_duration_unavailable = Counter(
+    "speech_audio_duration_unavailable_total",
+    "Audio duration extractions that could not be completed.",
+    registry=metrics_registry,
+)
+speech_text_characters = Counter(
+    "speech_text_characters_total",
+    "Characters submitted for speech synthesis.",
+    registry=metrics_registry,
+)
 
 
 class SynthesisRequest(BaseModel):
@@ -98,13 +135,52 @@ def _synthesize_longform(request: SynthesisRequest) -> bytes:
         return output.getvalue()
 
 
+def wav_duration_seconds(audio: bytes) -> float | None:
+    try:
+        info = sf.info(io.BytesIO(audio))
+        seconds = info.frames / info.samplerate
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    except (RuntimeError, ValueError, ZeroDivisionError):
+        return None
+
+
+@app.middleware("http")
+async def measure_synthesis_requests(request, call_next):
+    if request.method != "POST" or request.url.path != "/synthesize":
+        return await call_next(request)
+
+    started = time.perf_counter()
+    outcome = "server_error"
+    try:
+        response = await call_next(request)
+        if 200 <= response.status_code < 300:
+            outcome = "success"
+        elif 400 <= response.status_code < 500:
+            outcome = "client_error"
+        return response
+    finally:
+        speech_requests.labels(outcome=outcome).inc()
+        speech_request_duration.observe(time.perf_counter() - started)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": MODEL_ID, "device": DEVICE, "loaded": _model is not None}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(metrics_registry), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/synthesize", response_class=Response)
 async def synthesize(request: SynthesisRequest):
     generate = _synthesize if len(request.text) <= MAX_CHUNK_LENGTH else _synthesize_longform
     audio = await run_in_threadpool(generate, request)
+    duration = wav_duration_seconds(audio)
+    if duration is None:
+        speech_audio_duration_unavailable.inc()
+    else:
+        speech_audio_seconds.labels(direction="output").inc(duration)
+    speech_text_characters.inc(len(request.text))
     return Response(content=audio, media_type="audio/wav")

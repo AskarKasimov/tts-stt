@@ -48,6 +48,7 @@ dependencies = [
 [project.optional-dependencies]
 api = [
     "fastapi",
+    "prometheus-client",
     "uvicorn",
 ]
 api-test = [
@@ -61,6 +62,17 @@ dev = [
     "flake8>=3.8",
     "pre-commit>=2.0",
 ]
+
+[dependency-groups]
+ci-api = [
+    "fastapi",
+    "httpx",
+    "numpy",
+    "prometheus-client",
+    "pytest",
+    "soundfile",
+]
+
 [project.urls]
 Homepage = "https://github.com/OpenBMB/VoxCPM"
 Repository = "https://github.com/OpenBMB/VoxCPM.git"

@@ -80,3 +80,34 @@ docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml ps
 GPU-файл включает `DEVICE=cuda` и доступ к видеокартам для обоих сервисов.
 Порты 8000 и 8001 опубликованы на всех сетевых интерфейсах сервера. На macOS
 обычный `docker compose up -d --build` сохраняет CPU-режим.
+
+## Мониторинг нагрузки STT/TTS
+
+Grafana и Prometheus запускаются вместе с основным Compose-проектом. Эти
+контейнеры не получают GPU, Prometheus не публикуется наружу, а Grafana слушает
+только loopback.
+
+```bash
+cp .env.example .env
+# замените GRAFANA_ADMIN_PASSWORD в .env на настоящий секрет
+docker compose up -d --build
+docker compose ps
+```
+
+Grafana доступна на `127.0.0.1:3000`; внешний доступ делайте через SSH-туннель
+или аутентифицированный reverse proxy. Для провайдера создайте пользователя с
+ролью Viewer. Цели Prometheus проверяются на `http://localhost:9090/targets` из
+самого контейнера. Дашборд показывает запросы, минуты входного STT-аудио,
+минуты готового WAV TTS, задержки, ошибки и доступность сервисов.
+
+История хранится до 90 дней в volumes `prometheus-data` и `grafana-data`.
+Сбор начинается после развёртывания. Счётчики отражают HTTP-работу моделей,
+включая тестовые запросы, и не являются числом пользователей, занятий или
+GPU-часов.
+
+Проверка endpoints после запуска:
+
+```bash
+curl http://localhost:8000/metrics
+curl http://localhost:8001/metrics
+```

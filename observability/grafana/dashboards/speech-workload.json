@@ -1,0 +1,22 @@
+{
+  "uid": "speech-workload",
+  "title": "Нагрузка STT/TTS",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "time": {"from": "now-7d", "to": "now"},
+  "refresh": "15s",
+  "timepicker": {"refresh_intervals": ["5s", "15s", "30s", "1m"], "quick_ranges": [{"from": "now-7d", "to": "now"}, {"from": "now-30d", "to": "now"}]},
+  "templating": {"list": []},
+  "panels": [
+    {"id": 1, "type": "stat", "title": "Успешные запросы STT", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4}, "targets": [{"refId": "A", "expr": "sum(increase(speech_requests_total{outcome=\"success\",job=\"gigaam\"}[$__range]))"}]},
+    {"id": 2, "type": "stat", "title": "Успешные запросы TTS", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4}, "targets": [{"refId": "A", "expr": "sum(increase(speech_requests_total{outcome=\"success\",job=\"voxcpm2\"}[$__range]))"}]},
+    {"id": 3, "type": "stat", "title": "Минуты входного аудио STT", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4}, "targets": [{"refId": "A", "expr": "sum(increase(speech_audio_seconds_total{direction=\"input\",job=\"gigaam\"}[$__range])) / 60"}], "fieldConfig": {"defaults": {"unit": "m"}}},
+    {"id": 4, "type": "stat", "title": "Минуты готового WAV TTS", "description": "Длительность WAV включает паузы между частями длинного текста.", "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4}, "targets": [{"refId": "A", "expr": "sum(increase(speech_audio_seconds_total{direction=\"output\",job=\"voxcpm2\"}[$__range])) / 60"}], "fieldConfig": {"defaults": {"unit": "m"}}},
+    {"id": 5, "type": "timeseries", "title": "Успешные запросы по дням", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8}, "targets": [{"refId": "A", "expr": "sum(increase(speech_requests_total{outcome=\"success\"}[1d])) by (job)", "legendFormat": "{{job}}"}], "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 18, "spanNulls": false}}}},
+    {"id": 7, "type": "heatmap", "title": "Распределение времени обработки", "description": "Цвет показывает, где сосредоточены задержки запросов по времени. Отдельные редкие медленные запросы видны как выбросы.", "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8}, "targets": [{"refId": "A", "expr": "sum by (le,job)(rate(speech_request_duration_seconds_bucket[5m]))", "format": "heatmap", "legendFormat": "{{job}}"}], "fieldConfig": {"defaults": {"unit": "s"}}, "options": {"calculate": true, "calculation": {"xBuckets": {"mode": "count", "value": "30"}, "yBuckets": {"mode": "count", "value": "20"}}, "color": {"mode": "scheme", "scheme": "Oranges", "steps": 64}, "yAxis": {"unit": "s", "decimals": 2}}},
+    {"id": 8, "type": "timeseries", "title": "Ошибки и доля ошибок", "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8}, "targets": [{"refId": "A", "expr": "sum(increase(speech_requests_total{outcome=~\"client_error|server_error\"}[$__range])) by (job,outcome)", "legendFormat": "{{job}} / {{outcome}}"}, {"refId": "B", "expr": "100 * sum(rate(speech_requests_total{outcome=~\"client_error|server_error\"}[5m])) by (job) / sum(rate(speech_requests_total[5m])) by (job)", "legendFormat": "error % {{job}}"}], "fieldConfig": {"defaults": {"unit": "short"}}},
+    {"id": 9, "type": "stat", "title": "Доступность API", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8}, "targets": [{"refId": "A", "expr": "up{job=~\"gigaam|voxcpm2\"}", "legendFormat": "{{job}}"}], "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}},
+    {"id": 10, "type": "text", "title": "Как читать дашборд", "gridPos": {"x": 0, "y": 20, "w": 24, "h": 4}, "options": {"mode": "markdown", "content": "История начинается после развёртывания мониторинга и хранится не более 90 дней. Счётчики показывают HTTP-работу моделей, а не уникальных пользователей, занятия или GPU-часы."}}
+  ]
+}
