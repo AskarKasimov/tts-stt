@@ -48,6 +48,7 @@ dependencies = [
 [project.optional-dependencies]
 api = [
     "fastapi",
+    "prometheus-client",
     "uvicorn",
 ]
 api-test = [
