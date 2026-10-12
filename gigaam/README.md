@@ -81,7 +81,7 @@ docker compose up -d --build gigaam
 
 ```bash
 uv sync --extra api --extra tests
-uv run --no-sync python -m pytest -q tests/test_api.py
+uv run --no-sync python -m pytest -q tests/http
 ```
 
 В репозитории оставлены библиотека инференса и её тесты. Обучение,
