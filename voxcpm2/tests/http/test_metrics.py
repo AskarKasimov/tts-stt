@@ -36,7 +36,7 @@ def test_synthesis_metrics_track_success_validation_longform_and_unavailable(mon
         before, "speech_audio_seconds_total", direction="output"
     )
     before_chars = sample_value(before, "speech_text_characters_total")
-    response = client.post("/synthesize", json={"text": "Привет"})
+    response = client.post("/synthesize", json={"use_reference": False, "text": "Привет"})
     assert response.status_code == 200
     assert response.content[:4] == b"RIFF"
     after = current(client)
@@ -45,7 +45,7 @@ def test_synthesis_metrics_track_success_validation_longform_and_unavailable(mon
     assert sample_value(after, "speech_text_characters_total") - before_chars == len("Привет")
 
     before = after
-    response = client.post("/synthesize", json={"text": ""})
+    response = client.post("/synthesize", json={"use_reference": False, "text": ""})
     assert response.status_code == 422
     after = current(client)
     assert sample_value(after, "speech_requests_total", outcome="client_error") - sample_value(
@@ -60,7 +60,7 @@ def test_synthesis_metrics_track_success_validation_longform_and_unavailable(mon
 
     text = "А" * 490 + ". " + "Б" * 20
     before = after
-    response = client.post("/synthesize", json={"text": text})
+    response = client.post("/synthesize", json={"use_reference": False, "text": text})
     assert response.status_code == 200
     after = current(client)
     assert sample_value(after, "speech_requests_total", outcome="success") - sample_value(
@@ -76,7 +76,7 @@ def test_synthesis_metrics_track_success_validation_longform_and_unavailable(mon
 
     monkeypatch.setattr(api, "wav_duration_seconds", lambda audio: None)
     before = after
-    response = client.post("/synthesize", json={"text": "duration unavailable"})
+    response = client.post("/synthesize", json={"use_reference": False, "text": "duration unavailable"})
     assert response.status_code == 200
     after = current(client)
     assert sample_value(after, "speech_audio_duration_unavailable_total") - sample_value(

@@ -1,15 +1,21 @@
+import hashlib
 import io
+import json
+import logging
 import math
 import os
 import re
 import threading
+import tempfile
 import time
+from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -22,6 +28,14 @@ MODEL_ID = os.getenv("MODEL_ID", "openbmb/VoxCPM2")
 DEVICE = os.getenv("DEVICE", "cpu")
 MAX_CHUNK_LENGTH = 500
 CHUNK_PAUSE_SECONDS = 0.15
+REFERENCE_CACHE_DIR = Path(os.getenv("REFERENCE_CACHE_DIR", "/model-cache/voices"))
+REFERENCE_TEXT = (
+    "Давайте внимательно разберём задачу. Сначала определите, что уже известно "
+    "и какой результат нужно получить. Затем выберите подходящий способ решения "
+    "и объясните свой выбор. Если возникнут сомнения, вернитесь к условию, "
+    "проверьте каждый шаг и спокойно продолжайте работу."
+)
+logger = logging.getLogger("uvicorn.error")
 _model = None
 _model_lock = threading.Lock()
 
@@ -59,8 +73,18 @@ speech_text_characters = Counter(
 class SynthesisRequest(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     cfg_value: float = Field(default=2.0, ge=0.0, le=5.0)
-    inference_timesteps: int = Field(default=10, ge=1, le=50)
-    seed: int | None = None
+    inference_timesteps: int = Field(default=20, ge=1, le=50)
+    seed: int | None = 510
+    use_reference: bool = Field(
+        default=True,
+        description="Create or reuse a persistent reference voice for seed, CFG and inference steps.",
+    )
+
+    @model_validator(mode="after")
+    def reference_requires_seed(self):
+        if self.use_reference and self.seed is None:
+            raise ValueError("seed must not be null when use_reference is true")
+        return self
 
     @field_validator("text")
     @classmethod
@@ -101,15 +125,81 @@ def _load_model():
     return _model
 
 
+def _reference_for(model, request: SynthesisRequest) -> str | None:
+    """Called under _model_lock; references survive model and container restarts."""
+    if not request.use_reference:
+        return None
+    cache_key = json.dumps(
+        {
+            "version": 1,
+            "model": MODEL_ID,
+            "text": REFERENCE_TEXT,
+            "seed": request.seed,
+            "cfg_value": float(request.cfg_value) or 0.0,
+            "inference_timesteps": request.inference_timesteps,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    digest = hashlib.sha256(cache_key.encode()).hexdigest()
+    path = REFERENCE_CACHE_DIR / f"seed_{request.seed}_{digest}.wav"
+    if path.exists():
+        try:
+            audio, sample_rate = sf.read(path, dtype="float32")
+            if (
+                audio.ndim == 1 and audio.size > 0 and np.isfinite(audio).all()
+                and sample_rate == model.tts_model.sample_rate
+            ):
+                return str(path)
+        except (RuntimeError, ValueError):
+            pass
+        logger.warning("Regenerating invalid reference: %s", path)
+
+    audio = model.generate(
+        text=REFERENCE_TEXT,
+        cfg_value=request.cfg_value,
+        inference_timesteps=request.inference_timesteps,
+        seed=request.seed,
+        retry_badcase=False,
+    )
+    audio = np.asarray(audio)
+    if audio.ndim != 1 or audio.size == 0 or not np.isfinite(audio).all():
+        raise RuntimeError("Reference synthesis returned invalid audio")
+    REFERENCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=REFERENCE_CACHE_DIR, suffix=".wav", delete=False) as temp:
+        temp_path = Path(temp.name)
+    try:
+        sf.write(temp_path, audio, model.tts_model.sample_rate, format="WAV", subtype="PCM_16")
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    logger.info("Created reference: %s", path)
+    return str(path)
+
+
+def _generate_target(model, request: SynthesisRequest, text: str, reference: str | None):
+    options = {}
+    if reference is not None:
+        options["reference_wav_path"] = reference
+    audio = model.generate(
+        text=text,
+        cfg_value=request.cfg_value,
+        inference_timesteps=request.inference_timesteps,
+        seed=request.seed,
+        **options,
+    )
+    logger.info(
+        "Synthesized target: requested_seed=%s actual_seed=%s reference=%s",
+        request.seed, getattr(model.tts_model, "last_successful_seed", None), reference,
+    )
+    return audio
+
+
 def _synthesize(request: SynthesisRequest) -> bytes:
     with _model_lock:
         model = _load_model()
-        audio = model.generate(
-            text=request.text,
-            cfg_value=request.cfg_value,
-            inference_timesteps=request.inference_timesteps,
-            seed=request.seed,
-        )
+        reference = _reference_for(model, request)
+        audio = _generate_target(model, request, request.text, reference)
         output = io.BytesIO()
         sf.write(output, audio, model.tts_model.sample_rate, format="WAV")
         return output.getvalue()
@@ -119,16 +209,12 @@ def _synthesize_longform(request: SynthesisRequest) -> bytes:
     chunks = split_text(request.text)
     with _model_lock:
         model = _load_model()
+        reference = _reference_for(model, request)
         sample_rate = model.tts_model.sample_rate
         output = io.BytesIO()
         with sf.SoundFile(output, mode="w", samplerate=sample_rate, channels=1, format="WAV") as wav:
             for index, chunk in enumerate(chunks):
-                audio = model.generate(
-                    text=chunk,
-                    cfg_value=request.cfg_value,
-                    inference_timesteps=request.inference_timesteps,
-                    seed=request.seed,
-                )
+                audio = _generate_target(model, request, chunk, reference)
                 wav.write(audio)
                 if index < len(chunks) - 1:
                     wav.write([0.0] * int(sample_rate * CHUNK_PAUSE_SECONDS))
