@@ -38,7 +38,16 @@ curl -X POST 'http://localhost:8000/transcribe?word_timestamps=true' \
 нормализацией, что удобно для диалога с учеником. Если важнее минимальная
 ошибка распознавания без оформления текста, в [оценке авторов](gigaam/evaluation.md)
 `v3_rnnt` показывает средний WER 8,3% против 11,2% у `v3_e2e_rnnt`.
-Модель меняется через `MODEL_NAME` в Compose. Исходный код GigaAM взят из
+Модель по умолчанию задаётся через `MODEL_NAME` в Compose. Для отдельного
+запроса её можно выбрать через `POST /transcribe?model=multilingual_large_ctc`
+без перезапуска сервиса. Загруженные модели кешируются в RAM/VRAM
+(до `MODEL_CACHE_SIZE`, по умолчанию 2), веса сохраняются в Docker volume.
+Детали и допустимые имена — в [документации API](gigaam/README.md#выбор-модели-и-кеш).
+Backend ai-tutor передаёт STT URL целиком, поэтому для выбора модели можно
+задать `BACKEND_STT_URL=http://<адрес-сервера>:8000/transcribe?model=multilingual_large_ctc`.
+Изменение настройки backend требует её применения на стороне backend;
+повторный редеплой `tts-stt` для переключения модели не нужен.
+Исходный код GigaAM взят из
 [официального репозитория](https://github.com/salute-developers/GigaAM), коммит
 `7447938d791c4f3e643386ee22c33777004293a5`.
 

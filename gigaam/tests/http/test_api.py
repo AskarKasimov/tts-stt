@@ -42,6 +42,9 @@ class FakeLongformResult:
 
 
 class FakeModel:
+    def __init__(self, model_name=None):
+        pass
+
     def transcribe(self, path, word_timestamps=False):
         with open(path, "rb") as audio:
             content = audio.read()
