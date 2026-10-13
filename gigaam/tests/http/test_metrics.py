@@ -21,6 +21,9 @@ class FakeResult:
 
 
 class FakeModel:
+    def __init__(self, model_name=None):
+        pass
+
     def transcribe(self, path, word_timestamps=False):
         return FakeResult("recognized", [])
 

@@ -3,6 +3,7 @@ services:
     build: ./gigaam
     environment:
       MODEL_NAME: v3_e2e_rnnt
+      MODEL_CACHE_SIZE: ${MODEL_CACHE_SIZE:-2}
       DEVICE: cpu
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
