@@ -47,7 +47,6 @@ def test_model_loader_uses_configured_device(monkeypatch):
     monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
     monkeypatch.setattr(api, "DEVICE", "cuda")
     monkeypatch.setattr(api, "_model", None)
-    monkeypatch.setattr(api, "_warm_model", lambda model: None)
     monkeypatch.setattr(api, "_initialization_error", None)
     api._load_model()
     assert calls["model_id"] == api.MODEL_ID

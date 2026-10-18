@@ -87,7 +87,7 @@ def test_reference_failure_after_open_still_has_one_start(model, monkeypatch):
 def test_stream_validation_and_configuration_errors_remain_http(model, monkeypatch):
     client = TestClient(api.app)
     assert client.post("/synthesize/stream", json={"text": ""}).status_code == 422
-    monkeypatch.setenv("VOXCPM_OPTIMIZE", "invalid")
+    monkeypatch.setenv("VOXCPM_REFERENCE_CACHE_SIZE", "invalid")
     assert client.post("/synthesize/stream", json={"text": "Ответ"}).status_code == 503
 
 

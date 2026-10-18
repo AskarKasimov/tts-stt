@@ -9,17 +9,11 @@ from pathlib import Path
 import numpy as np
 
 
-def settings(device):
-    mode = os.getenv("VOXCPM_OPTIMIZE", "off").lower()
-    if mode not in {"off", "auto", "on"}:
-        raise ValueError("VOXCPM_OPTIMIZE must be off, auto or on")
-    cuda = device == "cuda" or device.startswith("cuda:")
-    if mode == "on" and not cuda:
-        raise ValueError("VOXCPM_OPTIMIZE=on requires CUDA")
+def reference_cache_size():
     size = int(os.getenv("VOXCPM_REFERENCE_CACHE_SIZE", "4"))
     if not 0 <= size <= 16:
         raise ValueError("VOXCPM_REFERENCE_CACHE_SIZE must be 0–16")
-    return mode, cuda and mode != "off", size
+    return size
 
 
 def isolated(value):

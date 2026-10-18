@@ -25,7 +25,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from runtime import ReferenceFeatures, settings
+from runtime import ReferenceFeatures, reference_cache_size
 from streaming import StreamCancelled, StreamJob
 
 MODEL_ID = os.getenv("MODEL_ID", "openbmb/VoxCPM2")
@@ -87,7 +87,6 @@ model_wait = Histogram("voxcpm_model_wait_seconds", "Time waiting for the model 
 reference_build = Histogram("voxcpm_reference_build_seconds", "Reference feature lookup/build time.", registry=metrics_registry)
 generation_duration = Histogram("voxcpm_generation_seconds", "Time generating target speech.", registry=metrics_registry)
 reference_cache = Counter("voxcpm_reference_cache_total", "Reference feature lookups.", ("outcome",), registry=metrics_registry)
-compile_fallback = Counter("voxcpm_compile_fallback_total", "Compile failures falling back to eager.", registry=metrics_registry)
 badcase_retries = Counter("voxcpm_badcase_retries_total", "Target badcase retries.", registry=metrics_registry)
 stream_events = Counter("voxcpm_streams_total", "Streaming synthesis outcomes.", ("outcome",), registry=metrics_registry)
 stream_ttfa = Histogram("voxcpm_stream_ttfa_seconds", "Request to first queued PCM.", registry=metrics_registry)
@@ -149,60 +148,24 @@ def split_text(text: str) -> list[str]:
 
 
 def _load_model():
-    """Initialize once under the model lock, including both public inference paths."""
+    """Load the eager model once under the model lock, without running synthesis."""
     global _model, _ready, _initialization_error, _features
     if _model is None:
         if _initialization_error is not None:
             raise RuntimeError("Model initialization failed; restart after fixing configuration") from _initialization_error
         try:
-            mode, optimize, size = settings(DEVICE)
+            size = reference_cache_size()
             from voxcpm import VoxCPM
-            for compiled in ([True, False] if mode == "auto" and optimize else [optimize]):
-                try:
-                    started = time.perf_counter()
-                    model = VoxCPM.from_pretrained(MODEL_ID, load_denoiser=False, optimize=compiled, device=DEVICE)
-                    logger.info("Model loaded: total_seconds=%.3f load_seconds=%s compile_setup_seconds=%s first_inference_seconds=%s requested=%s compiled=%s device=%s", time.perf_counter() - started, getattr(model, "load_seconds", None), getattr(model.tts_model, "optimization_setup_seconds", None), getattr(model, "first_inference_seconds", None), mode, compiled, DEVICE)
-                    if compiled and not getattr(model.tts_model, "optimization_enabled", False):
-                        raise RuntimeError("Upstream optimization did not complete")
-                    _features = ReferenceFeatures(size)
-                    started = time.perf_counter()
-                    _warm_model(model)
-                    logger.info("Model warmed: seconds=%.3f requested=%s actual=%s device=%s", time.perf_counter() - started, mode, "compiled" if compiled else "eager", DEVICE)
-                    _model, _ready = model, True
-                    break
-                except Exception:
-                    _features = ReferenceFeatures(size)
-                    if mode != "auto" or not compiled:
-                        raise
-                    compile_fallback.inc()
-                    logger.exception("Compile/first inference failed; rebuilding eager once")
-                    # Release all references to the failed compiled instance before reloading.
-                    model = None
+            started = time.perf_counter()
+            model = VoxCPM.from_pretrained(MODEL_ID, load_denoiser=False, optimize=False, device=DEVICE)
+            logger.info("Model loaded: total_seconds=%.3f load_seconds=%s device=%s", time.perf_counter() - started, getattr(model, "load_seconds", None), DEVICE)
+            _features = ReferenceFeatures(size)
+            _model, _ready = model, True
         except Exception as error:
             _initialization_error = error
             _ready = False
             raise
     return _model
-
-
-def _warm_model(model):
-    sample_rate = model.tts_model.sample_rate
-    if not isinstance(sample_rate, int) or not 8000 <= sample_rate <= 192000:
-        raise RuntimeError("Invalid model sample rate")
-    request = SynthesisRequest(text="Давайте спокойно решим задачу.")
-    reference = _reference_for(model, request)
-    _validate_audio(_generate_target(model, request, request.text, reference))
-    options = _generation_options(model, reference)
-    generator = model.generate_streaming(text=request.text, seed=request.seed, cfg_value=request.cfg_value,
-                                         inference_timesteps=request.inference_timesteps, retry_badcase=False, **options)
-    samples = 0
-    try:
-        for audio in generator:
-            samples += _validate_audio(audio).size
-    finally:
-        generator.close()
-    if samples == 0:
-        raise RuntimeError("Streaming warmup returned no audio")
 
 
 def _start_runtime():
@@ -214,7 +177,7 @@ def _start_runtime():
                 _load_model()
         except Exception:
             logger.exception("Runtime initialization failed; readiness remains unavailable")
-    threading.Thread(target=initialize, name="voxcpm-warmup", daemon=True).start()
+    threading.Thread(target=initialize, name="voxcpm-initialize", daemon=True).start()
 
 
 def _validate_audio(audio):
@@ -224,24 +187,10 @@ def _validate_audio(audio):
     return audio
 
 
-def _validate_pinned(path, sample_rate=None):
-    info = sf.info(path)
-    if info.format not in {"WAV", "WAVEX"}:
-        raise ValueError("Pinned reference must be a WAV file")
-    audio, rate = sf.read(path, dtype="float32")
-    _validate_audio(audio)
-    if sample_rate is not None and rate != sample_rate:
-        raise ValueError("Pinned reference sample rate must match the model")
-
-
 def _reference_for(model, request: SynthesisRequest, cancel_event=None) -> str | None:
     """Called under _model_lock; references survive model and container restarts."""
     if not request.use_reference:
         return None
-    pinned = os.getenv("VOXCPM_REFERENCE_WAV", "")
-    if pinned:
-        _validate_pinned(pinned, model.tts_model.sample_rate)
-        return pinned
     cache_key = json.dumps(
         {
             "version": 1,
@@ -493,12 +442,9 @@ def _stream_job(request):
 async def synthesize_stream(request: SynthesisRequest, http_request: Request):
     _require_available()
     try:
-        settings(DEVICE)
+        reference_cache_size()
         if _initialization_error is not None:
             raise RuntimeError("Runtime initialization failed")
-        pinned = os.getenv("VOXCPM_REFERENCE_WAV", "")
-        if request.use_reference and pinned:
-            _validate_pinned(pinned, _model.tts_model.sample_rate if _model is not None else None)
     except (ValueError, RuntimeError, OSError) as error:
         logger.error("Stream unavailable: %s", error)
         raise HTTPException(status_code=503, detail="TTS runtime unavailable") from error
