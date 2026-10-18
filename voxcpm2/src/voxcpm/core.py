@@ -3,6 +3,7 @@ import sys
 import re
 import json
 import tempfile
+import time
 import numpy as np
 from typing import Generator, Optional
 from huggingface_hub import snapshot_download
@@ -63,6 +64,7 @@ class VoxCPM:
             config = json.load(f)
         arch = config.get("architecture", "voxcpm").lower()
 
+        started = time.perf_counter()
         if arch == "voxcpm2":
             self.tts_model = VoxCPM2Model.from_local(
                 voxcpm_model_path,
@@ -81,6 +83,7 @@ class VoxCPM:
             print("Loaded VoxCPMModel", file=sys.stderr)
         else:
             raise ValueError(f"Unsupported architecture: {arch}")
+        self.load_seconds = max(0.0, time.perf_counter() - started - getattr(self.tts_model, "optimization_setup_seconds", 0.0))
 
         # Load LoRA weights if path is provided
         if lora_weights_path is not None:
@@ -96,12 +99,15 @@ class VoxCPM:
             self.denoiser = ZipEnhancer(zipenhancer_model_path)
         else:
             self.denoiser = None
+        self.first_inference_seconds = 0.0
         if optimize:
             print("Warm up VoxCPMModel...", file=sys.stderr)
+            started = time.perf_counter()
             self.tts_model.generate(
                 target_text="Hello, this is the first test sentence.",
                 max_len=10,
             )
+            self.first_inference_seconds = time.perf_counter() - started
 
     @classmethod
     def from_pretrained(
@@ -197,6 +203,8 @@ class VoxCPM:
         retry_badcase_ratio_threshold: float = 6.0,
         streaming: bool = False,
         seed: Optional[int] = None,
+        prompt_cache: Optional[dict] = None,
+        cancel_event=None,
     ) -> Generator[np.ndarray, None, None]:
         """Synthesize speech for the given text and return a single waveform.
 
@@ -220,6 +228,10 @@ class VoxCPM:
             retry_badcase_ratio_threshold: Threshold for audio-to-text ratio.
             streaming: Whether to return a generator of audio chunks.
             seed: Optional random seed for reproducibility.
+            prompt_cache: Prepared reference/prompt features. Mutually exclusive
+                with prompt/reference paths and denoise. The caller owns cache
+                isolation; normalization, seed and retry handling still apply.
+            cancel_event: Optional event checked between inference steps.
         Returns:
             Generator of numpy.ndarray: 1D waveform array (float32) on CPU.
             Yields audio chunks for each generation step if ``streaming=True``,
@@ -227,6 +239,8 @@ class VoxCPM:
         """
         if not isinstance(text, str) or not text.strip():
             raise ValueError("target text must be a non-empty string")
+        if prompt_cache is not None and (prompt_wav_path is not None or prompt_text is not None or reference_wav_path is not None or denoise):
+            raise ValueError("prompt_cache cannot be combined with prompt/reference paths or denoise")
 
         if prompt_wav_path is not None:
             if not os.path.exists(prompt_wav_path):
@@ -263,7 +277,9 @@ class VoxCPM:
                     self.denoiser.enhance(reference_wav_path, output_path=temp_files[-1])
                     actual_ref_path = temp_files[-1]
 
-            if actual_prompt_path is not None or actual_ref_path is not None:
+            if prompt_cache is not None:
+                fixed_prompt_cache = prompt_cache
+            elif actual_prompt_path is not None or actual_ref_path is not None:
                 if is_v2:
                     fixed_prompt_cache = self.tts_model.build_prompt_cache(
                         prompt_text=prompt_text,
@@ -285,6 +301,7 @@ class VoxCPM:
                     self.text_normalizer = TextNormalizer()
                 text = self.text_normalizer.normalize(text)
 
+            cancel_options = {"cancel_event": cancel_event} if cancel_event is not None else {}
             generate_result = self.tts_model._generate_with_prompt_cache(
                 target_text=text,
                 prompt_cache=fixed_prompt_cache,
@@ -297,6 +314,7 @@ class VoxCPM:
                 retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
                 streaming=streaming,
                 seed=seed,
+                **cancel_options,
             )
 
             if streaming:

@@ -20,6 +20,7 @@ limitations under the License.
 
 import os
 import sys
+import time
 from typing import Tuple, Union, Generator, List, Optional
 
 import torch
@@ -277,10 +278,14 @@ class VoxCPM2Model(nn.Module):
                     setattr(self, attr_name, LoRALinear(base=module, **lora_kwargs))
 
     def optimize(self, disable: bool = False):
+        self.optimization_enabled = False
+        self.optimization_error = None
+        self.optimization_setup_seconds = 0.0
         if disable:
             return self
+        started = time.perf_counter()
         try:
-            if self.device != "cuda":
+            if not str(self.device).startswith("cuda"):
                 raise ValueError("VoxCPMModel can only be optimized on CUDA device")
             try:
                 import triton  # noqa: F401
@@ -295,8 +300,12 @@ class VoxCPM2Model(nn.Module):
             self.feat_decoder.estimator = torch.compile(
                 self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True
             )
+            self.optimization_enabled = True
         except Exception as e:
+            self.optimization_error = str(e)
             print(f"Warning: torch.compile disabled - {e}", file=sys.stderr)
+        finally:
+            self.optimization_setup_seconds = time.perf_counter() - started
         return self
 
     def forward(
@@ -808,6 +817,7 @@ class VoxCPM2Model(nn.Module):
         streaming: bool = False,
         streaming_prefix_len: int = 4,
         seed: Optional[int] = None,
+        cancel_event=None,
     ) -> Generator[Tuple[torch.Tensor, torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """
         Generate audio using pre-built prompt cache.
@@ -937,7 +947,11 @@ class VoxCPM2Model(nn.Module):
         retry_badcase_times = 0
         current_seed = materialize_generation_seed(seed)
         last_attempt_seed = current_seed
+        self.last_badcase_retries = 0
         while retry_badcase_times < retry_badcase_max_times:
+            self.last_badcase_retries = retry_badcase_times
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Generation cancelled")
             last_attempt_seed = current_seed
             apply_generation_seed(last_attempt_seed)
 
@@ -952,6 +966,7 @@ class VoxCPM2Model(nn.Module):
                 cfg_value=cfg_value,
                 streaming=streaming,
                 streaming_prefix_len=streaming_prefix_len,
+                cancel_event=cancel_event,
             )
             if streaming:
                 with self.audio_vae.streaming_decode() as vae_dec:
@@ -1007,6 +1022,7 @@ class VoxCPM2Model(nn.Module):
         cfg_value: float = 2.0,
         streaming: bool = False,
         streaming_prefix_len: int = 4,
+        cancel_event=None,
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """Core inference method for audio generation.
 
@@ -1081,6 +1097,8 @@ class VoxCPM2Model(nn.Module):
         residual_hidden = residual_enc_outputs[:, -1, :]
 
         for i in tqdm(range(max_len)):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Generation cancelled")
             dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)  # [b, h_dit]
             dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
             dit_hidden = torch.cat((dit_hidden_1, dit_hidden_2), dim=-1)
@@ -1091,6 +1109,7 @@ class VoxCPM2Model(nn.Module):
                 cond=prefix_feat_cond.transpose(1, 2).contiguous(),
                 n_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
+                cancel_event=cancel_event,
             ).transpose(
                 1, 2
             )  # [b, p, d]
