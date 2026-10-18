@@ -17,11 +17,20 @@ services:
     environment:
       MODEL_ID: openbmb/VoxCPM2
       DEVICE: cpu
+      VOXCPM_OPTIMIZE: ${VOXCPM_OPTIMIZE:-off}
+      VOXCPM_REFERENCE_CACHE_SIZE: ${VOXCPM_REFERENCE_CACHE_SIZE:-4}
+      VOXCPM_REFERENCE_WAV: ${VOXCPM_REFERENCE_WAV:-}
     volumes:
       - voxcpm2-cache:/model-cache
     ports:
       - "8001:8000"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5m
+      retries: 5
   prometheus:
     image: prom/prometheus:v3.15.0
     command:

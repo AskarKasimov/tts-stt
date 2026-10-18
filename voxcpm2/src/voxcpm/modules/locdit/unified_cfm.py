@@ -58,6 +58,7 @@ class UnifiedCFM(torch.nn.Module):
         cfg_value: float = 1.0,
         sway_sampling_coef: float = 1.0,
         use_cfg_zero_star: bool = True,
+        cancel_event=None,
     ):
         b, _ = mu.shape
         t = patch_size
@@ -73,6 +74,7 @@ class UnifiedCFM(torch.nn.Module):
             cond=cond,
             cfg_value=cfg_value,
             use_cfg_zero_star=use_cfg_zero_star,
+            cancel_event=cancel_event,
         )
 
     def optimized_scale(self, positive_flat: torch.Tensor, negative_flat: torch.Tensor):
@@ -89,12 +91,15 @@ class UnifiedCFM(torch.nn.Module):
         cond: torch.Tensor,
         cfg_value: float = 1.0,
         use_cfg_zero_star: bool = True,
+        cancel_event=None,
     ):
         t, _, dt = t_span[0], t_span[-1], t_span[0] - t_span[1]
 
         sol = []
         zero_init_steps = max(1, int(len(t_span) * 0.04))
         for step in range(1, len(t_span)):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Generation cancelled")
             if use_cfg_zero_star and step <= zero_init_steps:
                 dphi_dt = torch.zeros_like(x)
             else:
