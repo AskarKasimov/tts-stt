@@ -26,6 +26,6 @@ RUN python3 -c 'import importlib.metadata as m; from pathlib import Path; Path("
     && python3 /opt/s2s/check_dependencies.py \
     && uv pip freeze --python "$(python3 -c 'import sys; print(sys.executable)')" > /opt/s2s/installed-packages.txt
 
-COPY deploy.yaml runtime.py client.py api.py verify_api.py /opt/s2s/
+COPY deploy.yaml gpu_policy.py gpu_policy.json runtime.py client.py api.py verify_api.py /opt/s2s/
 ENTRYPOINT ["python3", "/opt/s2s/runtime.py"]
 CMD ["serve"]

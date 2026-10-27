@@ -14,6 +14,8 @@ services:
     ports:
       - "127.0.0.1:${S2S_PORT:-8091}:8091"
     deploy:
+      # On the existing single-GPU server this is the STT/TTS card too.
+      # Omni budgets 70% VRAM in deploy.yaml; other services keep their containers.
       resources:
         reservations:
           devices:

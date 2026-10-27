@@ -1,0 +1,6 @@
+{
+  "minimum_total_gib": 76,
+  "minimum_compute_capability": [8, 0],
+  "qwen_memory_fraction": 0.70,
+  "minimum_free_fraction": 0.75
+}

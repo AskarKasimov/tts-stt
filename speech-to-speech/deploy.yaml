@@ -1,5 +1,6 @@
 # Self-contained adaptation of the pinned upstream qwen3_omni_moe.yaml.
-# Thinker INT4 W4A16; voice stages BF16. All stages share one physical GPU.
+# Thinker INT4 W4A16; voice stages BF16. Share GPU 0 with GigaAM/VoxCPM2.
+# Total Omni engine budget: 70%; leave 30% for existing services and headroom.
 async_chunk: true
 dtype: bfloat16
 connectors:
@@ -13,7 +14,7 @@ stages:
   - stage_id: 0
     devices: "0"
     tensor_parallel_size: 1
-    gpu_memory_utilization: 0.60
+    gpu_memory_utilization: 0.50
     max_num_seqs: 1
     max_model_len: 4096
     max_num_batched_tokens: 4096
@@ -32,7 +33,7 @@ stages:
   - stage_id: 1
     devices: "0"
     tensor_parallel_size: 1
-    gpu_memory_utilization: 0.20
+    gpu_memory_utilization: 0.15
     max_num_seqs: 1
     max_model_len: 4096
     max_num_batched_tokens: 4096
@@ -52,7 +53,7 @@ stages:
       repetition_penalty: 1.05
   - stage_id: 2
     devices: "0"
-    gpu_memory_utilization: 0.08
+    gpu_memory_utilization: 0.05
     max_num_seqs: 1
     max_num_batched_tokens: 65536
     enforce_eager: true

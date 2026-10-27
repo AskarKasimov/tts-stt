@@ -5,8 +5,9 @@ import platform
 import shutil
 import socket
 import subprocess
-import sys
 from pathlib import Path
+
+from gpu_policy import validate_gpu
 
 ROOT = Path(__file__).resolve().parent
 VERSIONS = json.loads((ROOT / "versions.json").read_text())
@@ -34,16 +35,14 @@ def check():
     service = compose["services"]["omni"]
     gpu_id = service["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"][0]
     gpu = command("nvidia-smi", "-i", str(gpu_id),
-                  "--query-gpu=name,memory.total,memory.free,driver_version", "--format=csv,noheader,nounits")
+                  "--query-gpu=name,memory.total,memory.free,driver_version,compute_cap", "--format=csv,noheader,nounits")
     if len(gpu.splitlines()) != 1:
         raise RuntimeError("GPU_ID должен выбирать ровно одну GPU.")
-    name, total, free, driver = [s.strip() for s in gpu.split(",")]
-    if not any(card in name for card in ("A100", "H100")) or float(total) < 76 * 1024:
-        raise RuntimeError(f"Нужна A100/H100 80 ГБ без MIG. Обнаружена {name}, {total} MiB.")
+    name, total, free, driver, capability = [s.strip() for s in gpu.split(",")]
+    budget = validate_gpu(float(total) * 1024**2, float(free) * 1024**2,
+                          tuple(int(part) for part in capability.split(".")))
     if version_tuple(driver) < version_tuple(VERSIONS["minimum_driver"]):
         raise RuntimeError(f"Драйвер {driver} слишком старый. Для выбранного CUDA 13 стека нужен {VERSIONS['minimum_driver']} или новее.")
-    if float(free) < float(total) * 0.90:
-        raise RuntimeError("GPU занята: свободно меньше 90% памяти. Остановите использующие её сервисы.")
     meminfo = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
     ram_gib = int(meminfo["MemTotal"].split()[0]) / 1024**2
     if ram_gib < 110:
@@ -80,7 +79,7 @@ def check():
                 sock.bind((port_config.get("host_ip", "0.0.0.0"), checked_port))
             except OSError as error:
                 raise RuntimeError(f"Порт {checked_port} занят. Если Omni уже запущен, используйте ./run.sh verify; иначе измените порт в .env.") from error
-    report = {"gpu": name, "gpu_id": gpu_id, "driver": driver,
+    report = {"gpu": name, "gpu_id": gpu_id, "driver": driver, **budget,
               "ram_gib": round(ram_gib, 1), "data_dir": str(data_dir),
               "data_free_gib": round(data_free, 1), "docker_free_gib": round(docker_free, 1), "port": port}
     reports = ROOT / "reports"

@@ -9,6 +9,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from gpu_policy import validate_gpu, validate_stage_budgets
+
 ROOT = Path(__file__).resolve().parent
 VERSIONS = json.loads((ROOT / "versions.json").read_text())
 PREPARED = Path("/models/prepared.json")
@@ -22,15 +24,10 @@ def gpu_check():
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("Контейнер должен видеть ровно одну CUDA GPU. Проверьте NVIDIA Container Toolkit и GPU_ID.")
     properties = torch.cuda.get_device_properties(0)
-    if not any(name in properties.name for name in ("A100", "H100")):
-        raise RuntimeError(f"Этот профиль предназначен для A100/H100 80 ГБ; получена {properties.name}.")
-    if properties.total_memory < 76 * 1024**3:
-        raise RuntimeError("Доступно меньше 76 GiB VRAM. Нужна целая карта 80 ГБ без MIG.")
     if not torch.cuda.is_bf16_supported():
         raise RuntimeError("GPU/драйвер не поддерживает BF16.")
     free, total = torch.cuda.mem_get_info()
-    if free < total * 0.90:
-        raise RuntimeError("Свободно меньше 90% VRAM. Освободите выбранную GPU и повторите проверку.")
+    budget = validate_gpu(total, free, torch.cuda.get_device_capability())
     x = torch.ones((64, 64), device="cuda", dtype=torch.bfloat16)
     if (x @ x).float().mean().item() != 64:
         raise RuntimeError("Проверка CUDA BF16 matmul не прошла.")
@@ -38,13 +35,13 @@ def gpu_check():
     from vllm_omni.config.stage_config import load_deploy_config
 
     deploy = load_deploy_config(ROOT / "deploy.yaml")
-    if [(s.stage_id, s.devices) for s in deploy.stages] != [(0, "0"), (1, "0"), (2, "0")]:
-        raise RuntimeError("Неверное размещение стадий в deploy.yaml.")
+    validate_stage_budgets(deploy.stages)
     report = {
         "gpu": properties.name,
         "compute_capability": list(torch.cuda.get_device_capability()),
         "total_gib": round(total / 1024**3, 2),
         "free_gib": round(free / 1024**3, 2),
+        **budget,
         "torch": torch.__version__,
         "cuda_runtime": torch.version.cuda,
         "vllm": importlib.metadata.version("vllm"),
