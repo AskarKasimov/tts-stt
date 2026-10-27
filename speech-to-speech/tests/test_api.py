@@ -12,7 +12,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from api import MAX_BODY_BYTES, MAX_FILE_BYTES, create_app, normalize_audio
+from api import MAX_BODY_BYTES, MAX_CHAT_BODY_BYTES, MAX_FILE_BYTES, create_app
 
 
 def audio(seconds=0.1):
@@ -105,6 +105,73 @@ class ApiTests(unittest.TestCase):
         client.post("/speech-to-speech", files={"file": ("q.wav", audio())})
         self.assertIn('speech_requests_total{outcome="success"} 1.0', client.get("/metrics").text)
 
+    def test_chat_preserves_history_and_requests_only_text(self):
+        seen = []
+
+        def engine(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Четыре."}}],
+                                           "usage": {"total_tokens": 20}})
+
+        messages = [{"role": "system", "content": "Отвечай развёрнуто."},
+                    {"role": "user", "content": "Два плюс два?"}]
+        response = self.client(engine).post("/chat", json={"messages": messages, "max_tokens": 512, "temperature": 0})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"text": "Четыре.", "model": "qwen3-omni-speech", "usage": {"total_tokens": 20}})
+        self.assertEqual(seen[0], {"model": "qwen3-omni-speech", "modalities": ["text"], "stream": False,
+                                  "messages": messages, "max_tokens": 512, "temperature": 0})
+
+    def test_chat_does_not_decode_audio_or_require_audio_output(self):
+        async def no_audio(data):
+            self.fail("Текстовый запрос не должен вызывать аудиообработку")
+
+        app = create_app(normalizer=no_audio, transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "Ответ"}}]})
+        ))
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"messages": [{"role": "user", "content": "Привет"}]})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["text"], "Ответ")
+            self.assertNotIn("audio", response.json())
+            self.assertIn('text_requests_total{outcome="success"} 1.0', client.get("/metrics").text)
+
+    def test_chat_rejects_invalid_or_multimodal_input(self):
+        client = self.client(lambda request: self.fail("Некорректный ввод не должен попадать в модель"))
+        for body in [
+            {"messages": []},
+            {"messages": [{"role": "user", "content": "   "}]},
+            {"messages": [{"role": "user", "content": [{"type": "audio_url"}]}]},
+            {"messages": [{"role": "tool", "content": "text"}]},
+            {"messages": [{"role": "user", "content": "text"}], "max_tokens": 1025},
+            {"messages": [{"role": "user", "content": "text"}], "modalities": ["audio"]},
+            {"messages": [{"role": "user", "content": "a" * 7000}, {"role": "user", "content": "b" * 7000}]},
+        ]:
+            with self.subTest(body=str(body)[:80]):
+                self.assertEqual(client.post("/chat", json=body).status_code, 422)
+
+    def test_oversized_chat_body_is_413(self):
+        client = self.client(lambda request: self.fail("Запрос не должен попадать в модель"))
+        self.assertEqual(client.post("/chat", content=bytes(MAX_CHAT_BODY_BYTES + 1)).status_code, 413)
+
+    def test_chat_invalid_upstream_response_is_502(self):
+        for result in [{"choices": []}, {"choices": [{"message": {"content": ""}}]}, {"choices": None}]:
+            with self.subTest(result=result):
+                client = self.client(lambda request: httpx.Response(200, json=result))
+                self.assertEqual(client.post("/chat", json={"messages": [{"role": "user", "content": "Тест"}]}).status_code, 502)
+
+    def test_chat_engine_errors(self):
+        body = {"messages": [{"role": "user", "content": "Тест"}]}
+        for status, expected in [(400, 422), (422, 422), (500, 502)]:
+            with self.subTest(status=status):
+                client = self.client(lambda request: httpx.Response(status))
+                self.assertEqual(client.post("/chat", json=body).status_code, expected)
+        for error_type, expected in [(httpx.ConnectError, 503), (httpx.ReadTimeout, 504)]:
+            def engine(request):
+                raise error_type("test", request=request)
+
+            with self.subTest(error_type=error_type):
+                self.assertEqual(self.client(engine).post("/chat", json=body).status_code, expected)
+
     def test_busy_admission_and_release(self):
         async def check():
             entered, release = asyncio.Event(), asyncio.Event()
@@ -121,10 +188,31 @@ class ApiTests(unittest.TestCase):
                     await asyncio.wait_for(entered.wait(), 5)
                     second = await client.post("/speech-to-speech", files={"file": ("q.wav", audio())})
                     self.assertEqual(second.status_code, 429)
+                    self.assertEqual((await client.post("/chat", json={"messages": [{"role": "user", "content": "Тест"}]})).status_code, 429)
                     self.assertEqual((await client.get("/health")).status_code, 200)
                     release.set()
                     self.assertEqual((await first).status_code, 200)
                     self.assertEqual((await client.post("/speech-to-speech", files={"file": ("q.wav", audio())})).status_code, 200)
+
+        asyncio.run(check())
+
+    def test_chat_and_speech_share_the_same_generation_slot(self):
+        async def check():
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def engine(request):
+                entered.set()
+                await release.wait()
+                return httpx.Response(200, json={"choices": [{"message": {"content": "Ответ"}}]})
+
+            app = create_app(transport=httpx.MockTransport(engine))
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+                    first = asyncio.create_task(client.post("/chat", json={"messages": [{"role": "user", "content": "Тест"}]}))
+                    await asyncio.wait_for(entered.wait(), 5)
+                    self.assertEqual((await client.post("/speech-to-speech", files={"file": ("q.wav", audio())})).status_code, 429)
+                    release.set()
+                    self.assertEqual((await first).status_code, 200)
 
         asyncio.run(check())
 

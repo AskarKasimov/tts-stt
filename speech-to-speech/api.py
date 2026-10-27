@@ -1,4 +1,4 @@
-"""Multipart speech API; the model is served by the separate Omni process."""
+"""Speech and text API; the model is served by the separate Omni process."""
 
 import asyncio
 import base64
@@ -13,6 +13,7 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Histogram, generate_latest
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.responses import JSONResponse, Response
 
 from client import MODEL, SYSTEM, decode_reply, validate_wav
@@ -20,6 +21,32 @@ from client import MODEL, SYSTEM, decode_reply, validate_wav
 MAX_FILE_BYTES = 10 * 1024**2
 MAX_BODY_BYTES = MAX_FILE_BYTES + 1024**2
 MAX_SECONDS = 30
+MAX_CHAT_BODY_BYTES = 128 * 1024
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(min_length=1, max_length=8000, strict=True)
+
+    @model_validator(mode="after")
+    def nonblank(self):
+        if not self.content.strip():
+            raise ValueError("Текст сообщения не должен быть пустым.")
+        return self
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messages: list[ChatMessage] = Field(min_length=1, max_length=32)
+    max_tokens: int = Field(default=256, ge=1, le=1024, strict=True)
+    temperature: float = Field(default=0.7, ge=0, le=2, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def bound_history(self):
+        if sum(len(message.content) for message in self.messages) > 12000:
+            raise ValueError("История превышает 12 000 символов.")
+        return self
 
 
 async def normalize_audio(data):
@@ -54,17 +81,19 @@ async def normalize_audio(data):
 
 
 class AdmissionMiddleware:
-    """Admit one generation and limit bytes before the multipart parser runs."""
+    """Share one generation slot across text/speech and bound request bodies."""
 
     def __init__(self, app, rejected):
         self.app, self.rejected = app, rejected
         self.busy = False
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] != "/speech-to-speech" or scope["method"] != "POST":
+        if scope["type"] != "http" or scope["path"] not in self.rejected or scope["method"] != "POST":
             return await self.app(scope, receive, send)
+        counter = self.rejected[scope["path"]]
+        limit = MAX_CHAT_BODY_BYTES if scope["path"] == "/chat" else MAX_BODY_BYTES
         if self.busy:
-            self.rejected.labels(outcome="busy").inc()
+            counter.labels(outcome="busy").inc()
             return await JSONResponse({"detail": "Модель занята. Повторите запрос позже."}, 429,
                                       headers={"Retry-After": "5"})(scope, receive, send)
         self.busy = True
@@ -75,9 +104,9 @@ class AdmissionMiddleware:
                 if message["type"] == "http.disconnect":
                     return
                 chunk = message.get("body", b"")
-                if len(body) + len(chunk) > MAX_BODY_BYTES:
-                    self.rejected.labels(outcome="too_large").inc()
-                    return await JSONResponse({"detail": "Слишком большой запрос; лимит файла 10 MiB."}, 413)(scope, receive, send)
+                if len(body) + len(chunk) > limit:
+                    counter.labels(outcome="too_large").inc()
+                    return await JSONResponse({"detail": "Превышен лимит размера запроса."}, 413)(scope, receive, send)
                 body.extend(chunk)
                 if not message.get("more_body", False):
                     break
@@ -99,6 +128,8 @@ def create_app(*, transport=None, normalizer=normalize_audio):
     registry = CollectorRegistry()
     requests = Counter("speech_requests_total", "Speech requests by outcome", ["outcome"], registry=registry)
     duration = Histogram("speech_request_duration_seconds", "Speech request time", registry=registry)
+    text_requests = Counter("text_requests_total", "Text requests by outcome", ["outcome"], registry=registry)
+    text_duration = Histogram("text_request_duration_seconds", "Text request time", registry=registry)
     engine_url = os.getenv("OMNI_URL", "http://omni:8091").rstrip("/")
 
     @asynccontextmanager
@@ -108,7 +139,7 @@ def create_app(*, transport=None, normalizer=normalize_audio):
             yield
 
     app = FastAPI(title="Qwen3-Omni Speech-to-Speech", lifespan=lifespan)
-    app.add_middleware(AdmissionMiddleware, rejected=requests)
+    app.add_middleware(AdmissionMiddleware, rejected={"/speech-to-speech": requests, "/chat": text_requests})
 
     @app.get("/health")
     async def health():
@@ -122,6 +153,41 @@ def create_app(*, transport=None, normalizer=normalize_audio):
     @app.get("/metrics")
     async def metrics():
         return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+    @app.post("/chat")
+    async def chat(body: ChatRequest):
+        started, outcome = time.perf_counter(), "error"
+        try:
+            payload = {
+                "model": MODEL, "modalities": ["text"], "stream": False,
+                "messages": [message.model_dump() for message in body.messages],
+                "max_tokens": body.max_tokens, "temperature": body.temperature,
+            }
+            try:
+                response = await app.state.engine.post(engine_url + "/v1/chat/completions", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                text = result["choices"][0]["message"]["content"]
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("Пустой текстовый ответ.")
+            except httpx.TimeoutException as error:
+                raise HTTPException(504, "Истёк таймаут ответа модели.") from error
+            except httpx.ConnectError as error:
+                raise HTTPException(503, "Нет соединения с движком модели.") from error
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in (400, 422):
+                    raise HTTPException(422, "Модель отклонила запрос. Сократите историю или max_tokens.") from error
+                raise HTTPException(502, "Ошибка текстового движка. Проверьте логи Omni.") from error
+            except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as error:
+                raise HTTPException(502, "Движок не вернул корректный текстовый ответ.") from error
+            outcome = "success"
+            answer = {"text": text, "model": MODEL}
+            if isinstance(result.get("usage"), dict):
+                answer["usage"] = result["usage"]
+            return answer
+        finally:
+            text_requests.labels(outcome=outcome).inc()
+            text_duration.observe(time.perf_counter() - started)
 
     @app.post("/speech-to-speech", responses={200: {"content": {"audio/wav": {}}}})
     async def speech_to_speech(

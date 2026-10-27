@@ -20,12 +20,16 @@ class Fake(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        url = body["messages"][1]["content"][0]["audio_url"]["url"]
         assert body["model"] == "qwen3-omni-speech"
-        assert body["modalities"] == ["text", "audio"]
-        result = {"choices": [{"message": {"content": "Ответ заглушки."}}, {"message": {
-            "audio": {"data": url.split(",", 1)[1]}
-        }}]}
+        if body["modalities"] == ["text"]:
+            assert body["messages"][-1]["content"] == "Сколько будет два плюс два?"
+            result = {"choices": [{"message": {"content": "Четыре."}}]}
+        else:
+            assert body["modalities"] == ["text", "audio"]
+            url = body["messages"][1]["content"][0]["audio_url"]["url"]
+            result = {"choices": [{"message": {"content": "Ответ заглушки."}}, {"message": {
+                "audio": {"data": url.split(",", 1)[1]}
+            }}]}
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -62,7 +66,11 @@ def probe():
         assert client.post("/speech-to-speech", files={"file": ("bad", b"broken")}).status_code == 400
         assert "speech_requests_total" in client.get("/metrics").text
         assert client.get("/docs").status_code == 200
-        print("PASS: real Uvicorn + multipart + ffmpeg + fake upstream + WAV/JSON + errors/metrics/docs; no model inference.")
+        response = client.post("/chat", json={"messages": [{"role": "user", "content": "Сколько будет два плюс два?"}]})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"text": "Четыре.", "model": "qwen3-omni-speech"}
+        assert "text_requests_total" in client.get("/metrics").text
+        print("PASS: real Uvicorn + speech/text routes + ffmpeg + fake upstream + WAV/JSON + errors/metrics/docs; no model inference.")
 
 
 if __name__ == "__main__":
