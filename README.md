@@ -1,136 +1,82 @@
 # tts-stt
 
-HTTP API распознавания и синтеза речи: GigaAM и VoxCPM2.
-Репозиторий содержит исходники моделей, HTTP-обёртки, тесты и Docker-конфигурацию.
-Развёртывание на отдельном сервере выполняет серверная команда.
+Сервисы распознавания, синтеза и диалоговой обработки речи:
+* **GigaAM** (STT): распознавание речи (порт `8000`)
+* **VoxCPM2** (TTS): синтез речи (порт `8001`)
+* **Qwen3-Omni INT4** (Speech-to-Speech): сквозной голосовой диалог (порт `8002`)
+* **Grafana / Prometheus**: мониторинг и метрики (порт `18473`)
 
-Комплект запуска Qwen3-Omni с квантованием INT4 на той же NVIDIA GPU 80 ГБ,
-на которой работают GigaAM/VoxCPM2 (бюджет Qwen — 70% памяти):
-[пошаговая инструкция speech-to-speech](speech-to-speech/README.md).
-Содержит отдельный Compose, HTTP API на порту 8002, проверки сервера,
-скачивание весов и тест голосового ответа. Контракт — в
-[API.md](speech-to-speech/API.md). Запуск модели на целевой GPU ещё не проверен.
+Контракты репетитора находятся в [ai-tutor](https://github.com/AskarKasimov/ai-tutor).
 
-Документация и контракты репетитора находятся в
-[ai-tutor](https://github.com/AskarKasimov/ai-tutor), локально — `../ai-tutor`.
+---
 
-## GigaAM
+## 1. Запуск на сервере с NVIDIA GPU
 
-Исходный код модели, HTTP API, Dockerfile и `uv.lock` находятся в
-[`gigaam`](gigaam/README.md). Все команды `uv` для GigaAM
-запускайте из этого каталога.
-
-Запуск HTTP API из корня этого репозитория:
-
+### GigaAM (STT) + VoxCPM2 (TTS)
+Запуск основных сервисов STT и TTS:
 ```bash
-docker compose up -d --build gigaam
+docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
+```
+* **STT Healthcheck:** `curl http://localhost:8000/health`
+* **TTS Healthcheck:** `curl http://localhost:8001/health`
+* **Grafana:** `http://<адрес-сервера>:18473` (логин/пароль настраиваются в `.env`)
+
+### Qwen3-Omni (Speech-to-Speech)
+Запускается **независимым** compose-файлом из корня (не затрагивает STT/TTS):
+```bash
+docker compose -f docker-compose.qwen.yaml up -d --build
+```
+> *Примечание: для первого запуска с автоматической проверкой окружения и GPU-памяти можно использовать скрипт: `cd speech-to-speech && ./run.sh install`.*
+
+* **Qwen3-Omni Healthcheck:** `curl http://localhost:8002/health`
+* **Внутренний движок Omni:** `http://127.0.0.1:8091`
+
+---
+
+## 2. Локальный запуск на CPU (macOS / разработка)
+
+Для локального тестирования STT и TTS без GPU:
+```bash
+docker compose up -d --build
 ```
 
-Проверка: `curl http://localhost:8000/health`.
+---
 
-`POST /transcribe` автоматически выбирает обработку по длительности: до
-25 секунд — обычное распознавание, длиннее — VAD и longform:
+## 3. Быстрая проверка API
 
+### Распознавание (GigaAM)
 ```bash
 curl -X POST 'http://localhost:8000/transcribe?word_timestamps=true' \
-  -F 'file=@long-answer.wav'
+  -F 'file=@audio.wav'
 ```
 
-Лимит файла — 25 МиБ; ответ содержит `text` и `model`, для длинных записей
-также `segments`. По запросу возвращаются таймкоды слов.
-Подготовка VAD-весов (`HF_TOKEN`) и поддерживаемые платформы описаны в
-[документации GigaAM](gigaam/README.md#длинные-записи).
-
-По умолчанию выбран `v3_e2e_rnnt`: он возвращает текст с пунктуацией и
-нормализацией, что удобно для диалога с учеником. Если важнее минимальная
-ошибка распознавания без оформления текста, в [оценке авторов](gigaam/evaluation.md)
-`v3_rnnt` показывает средний WER 8,3% против 11,2% у `v3_e2e_rnnt`.
-Модель по умолчанию задаётся через `MODEL_NAME` в Compose. Для отдельного
-запроса её можно выбрать через `POST /transcribe?model=multilingual_large_ctc`
-без перезапуска сервиса. Загруженные модели кешируются в RAM/VRAM
-(до `MODEL_CACHE_SIZE`, по умолчанию 2), веса сохраняются в Docker volume.
-Детали и допустимые имена — в [документации API](gigaam/README.md#выбор-модели-и-кеш).
-Backend ai-tutor передаёт STT URL целиком, поэтому для выбора модели можно
-задать `BACKEND_STT_URL=http://<адрес-сервера>:8000/transcribe?model=multilingual_large_ctc`.
-Изменение настройки backend требует её применения на стороне backend;
-повторный редеплой `tts-stt` для переключения модели не нужен.
-Исходный код GigaAM взят из
-[официального репозитория](https://github.com/salute-developers/GigaAM), коммит
-`7447938d791c4f3e643386ee22c33777004293a5`.
-
-## VoxCPM2
-
-Официальный исходный код [OpenBMB/VoxCPM](https://github.com/OpenBMB/VoxCPM)
-с HTTP API находится в [`voxcpm2`](voxcpm2/API.md). Используется исходный
-коммит `f772e498a45fbb5fb8e13fbf9b9c48be9fe33e69`.
-
+### Синтез (VoxCPM2)
 ```bash
-docker compose up -d --build voxcpm2
-curl http://localhost:8001/health
 curl -X POST http://localhost:8001/synthesize \
   -H 'Content-Type: application/json' \
   -d '{"text":"Привет, мир!"}' --output speech.wav
 ```
 
-Первый запрос скачает веса модели в Docker volume. В Docker Desktop на macOS
-сервис работает на CPU; синтез может быть медленным.
-
-По умолчанию `seed=510`, `cfg_value=2`, `inference_timesteps=20`,
-`use_reference=true`: первый запрос для комбинации параметров дополнительно
-создаёт референс на фиксированной фразе и сохраняет WAV в volume. Последующие
-запросы используют этот голос. `use_reference=false` отключает подготовку и
-использование референса. Подробности — в [документации](voxcpm2/API.md#постоянный-голос).
-
-`VoxCPM2` — актуальная модель в линейке VoxCPM с поддержкой русского языка.
-Она выбрана ради качества и возможностей синтеза, а не скорости CPU-инференса.
-`POST /synthesize` принимает до 10 000 символов: до 500 символов сервис
-использует обычную генерацию, длиннее — озвучивает текст по частям и возвращает
-один WAV. Подробности — в
-[документации VoxCPM2](voxcpm2/API.md#длинный-текст).
-
-## Запуск на сервере с NVIDIA GPU
-
-На Linux x86_64 образы GigaAM/VoxCPM2 устанавливают PyTorch с CUDA 12.8. Для передачи GPU
-обоим контейнерам нужны драйвер NVIDIA и NVIDIA Container Toolkit на сервере.
-Запуск из корня этого репозитория:
-
+### Голосовой диалог и чат (Qwen3-Omni)
 ```bash
-docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
-docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml ps
+# Speech-to-Speech (вход: аудио -> ответ: аудио WAV)
+curl -X POST http://localhost:8002/speech-to-speech \
+  -F 'file=@audio.wav' \
+  -o reply.wav
+
+# Текстовый чат
+curl -X POST http://localhost:8002/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Привет!"}]}'
 ```
 
-GPU-файл включает `DEVICE=cuda` и доступ к видеокартам для обоих сервисов.
-Порты 8000 и 8001 опубликованы на всех сетевых интерфейсах сервера. На macOS
-обычный `docker compose up -d --build` сохраняет CPU-режим.
+---
 
-## Мониторинг нагрузки STT/TTS
+## 4. Подробная документация
 
-Grafana и Prometheus запускаются вместе с основным Compose-проектом. Эти
-контейнеры не получают GPU. Prometheus не публикуется наружу, а Grafana
-доступна на всех сетевых интерфейсах сервера.
-
-```bash
-cp .env.example .env
-# замените GRAFANA_ADMIN_PASSWORD в .env на настоящий секрет
-docker compose up -d --build
-docker compose ps
-```
-
-Grafana доступна извне по `http://<адрес-сервера>:18473`, если порт 18473 открыт
-в межсетевом экране. Для доступа через интернет настройте HTTPS на reverse proxy
-и создайте для провайдера пользователя с ролью Viewer. Цели Prometheus
-проверяются на `http://localhost:9090/targets` из
-самого контейнера. Дашборд показывает запросы, минуты входного STT-аудио,
-минуты готового WAV TTS, задержки, ошибки и доступность сервисов.
-
-История хранится до 90 дней в volumes `prometheus-data` и `grafana-data`.
-Сбор начинается после развёртывания. Счётчики отражают HTTP-работу моделей,
-включая тестовые запросы, и не являются числом пользователей, занятий или
-GPU-часов.
-
-Проверка endpoints после запуска:
-
-```bash
-curl http://localhost:8000/metrics
-curl http://localhost:8001/metrics
-```
+* **GigaAM (STT):** [gigaam/README.md](gigaam/README.md)
+* **VoxCPM2 (TTS):** [voxcpm2/API.md](voxcpm2/API.md)
+* **Qwen3-Omni (Speech-to-Speech):**
+  * Пошаговое развёртывание: [speech-to-speech/README.md](speech-to-speech/README.md)
+  * Спецификация HTTP API: [speech-to-speech/API.md](speech-to-speech/API.md)
+  * Эксплуатация и траблшутинг: [speech-to-speech/OPERATIONS.md](speech-to-speech/OPERATIONS.md)

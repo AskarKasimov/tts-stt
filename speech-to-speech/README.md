@@ -118,6 +118,15 @@ curl --fail-with-body http://localhost:8002/chat \
 - `./run.sh start` — быстро запустить сервис с уже скачанными весами (после остановки или перезагрузки сервера).
 - `./run.sh doctor` — собрать логи и диагностику GPU в папку `reports/`.
 
+> **Запуск из корня репозитория:**
+> Для прямого управления контейнерами Qwen без перехода в каталог `speech-to-speech` можно использовать отдельный compose-файл:
+> ```bash
+> docker compose -f docker-compose.qwen.yaml up -d --build
+> docker compose -f docker-compose.qwen.yaml ps
+> docker compose -f docker-compose.qwen.yaml logs -f
+> docker compose -f docker-compose.qwen.yaml down
+> ```
+
 ---
 
 ## 5. Частые ошибки и их решение
