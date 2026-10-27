@@ -21,20 +21,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install HTTP test dependencies
-        run: uv pip install --system -c speech-to-speech/constraints.lock packaging fastapi httpx python-multipart prometheus-client imageio-ffmpeg
+        run: python3 -m pip install -c speech-to-speech/constraints.lock packaging fastapi httpx python-multipart prometheus-client imageio-ffmpeg
       - name: Expose prebuilt ffmpeg binary
         run: |
           if ! command -v ffmpeg >/dev/null; then
-            FFMPEG_BIN="$(uv run --no-project python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+            FFMPEG_BIN="$(python3 -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
             sudo ln -sf "$FFMPEG_BIN" /usr/local/bin/ffmpeg
           fi
           ffmpeg -version | head -n 1
       - name: Check failure handling without model weights
-        run: uv run --no-project python -m unittest discover -s speech-to-speech/tests -v
+        run: python3 -m unittest discover -s speech-to-speech/tests -v
       - name: Check launcher and Docker Compose syntax
         run: |
           bash -n speech-to-speech/run.sh
