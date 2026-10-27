@@ -4,6 +4,12 @@ HTTP API распознавания и синтеза речи: GigaAM и VoxCPM
 Репозиторий содержит исходники моделей, HTTP-обёртки, тесты и Docker-конфигурацию.
 Развёртывание на отдельном сервере выполняет серверная команда.
 
+Комплект запуска Qwen3-Omni с квантованием INT4 на одной A100/H100 80 ГБ:
+[пошаговая инструкция speech-to-speech](speech-to-speech/README.md).
+Содержит отдельный Compose, HTTP API на порту 8002, проверки сервера,
+скачивание весов и тест голосового ответа. Контракт — в
+[API.md](speech-to-speech/API.md). Запуск модели на целевой GPU ещё не проверен.
+
 Документация и контракты репетитора находятся в
 [ai-tutor](https://github.com/AskarKasimov/ai-tutor), локально — `../ai-tutor`.
 
@@ -83,7 +89,7 @@ curl -X POST http://localhost:8001/synthesize \
 
 ## Запуск на сервере с NVIDIA GPU
 
-На Linux x86_64 образы устанавливают PyTorch с CUDA 12.8. Для передачи GPU
+На Linux x86_64 образы GigaAM/VoxCPM2 устанавливают PyTorch с CUDA 12.8. Для передачи GPU
 обоим контейнерам нужны драйвер NVIDIA и NVIDIA Container Toolkit на сервере.
 Запуск из корня этого репозитория:
 
