@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-mkdir -p output reports
+export HOST_UID="${HOST_UID:-$(id -u)}"
+export HOST_GID="${HOST_GID:-$(id -g)}"
+mkdir -p data output reports
 
 dc() { docker compose -f compose.yaml "$@"; }
 
@@ -60,7 +62,7 @@ case "${1:-help}" in
   stop) dc down ;;
   doctor) diagnostics; printf 'Диагностика сохранена в reports/\n' ;;
   test)
-    dc run --rm --no-deps --entrypoint python3 -v "$PWD/tests:/opt/s2s/tests:ro" download -m unittest discover -s /opt/s2s/tests -v
+    dc run --rm --no-deps --entrypoint python3 -v "$PWD:/opt/s2s:ro" download -m unittest discover -s /opt/s2s/tests -v
     # Separate project: never connects a fake engine to the production service.
     test_result=0
     docker compose -f compose.cpu-test.yaml up --abort-on-container-exit --exit-code-from probe || test_result=$?

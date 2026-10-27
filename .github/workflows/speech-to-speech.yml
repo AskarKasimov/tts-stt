@@ -11,25 +11,30 @@ on:
       - '.github/workflows/speech-to-speech.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cpu-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.12'
       - name: Install HTTP test dependencies
-        run: python3 -m pip install -c speech-to-speech/constraints.lock packaging fastapi httpx python-multipart prometheus-client
-      - name: Install audio decoder
+        run: uv pip install --system -c speech-to-speech/constraints.lock packaging fastapi httpx python-multipart prometheus-client imageio-ffmpeg
+      - name: Expose prebuilt ffmpeg binary
         run: |
           if ! command -v ffmpeg >/dev/null; then
-            sudo apt-get update -o Acquire::Retries=3
-            sudo apt-get install -y ffmpeg
+            FFMPEG_BIN="$(uv run --no-project python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+            sudo ln -sf "$FFMPEG_BIN" /usr/local/bin/ffmpeg
           fi
+          ffmpeg -version | head -n 1
       - name: Check failure handling without model weights
-        run: python3 -m unittest discover -s speech-to-speech/tests -v
+        run: uv run --no-project python -m unittest discover -s speech-to-speech/tests -v
       - name: Check launcher and Docker Compose syntax
         run: |
           bash -n speech-to-speech/run.sh

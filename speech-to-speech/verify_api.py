@@ -1,5 +1,6 @@
 """Run after the direct-model self test, through the real multipart API."""
 
+import os
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,14 @@ def main():
     response.raise_for_status()
     validate_wav(response.content)
     Path("/output/api-answer.wav").write_bytes(response.content)
+    uid, gid = os.getenv("HOST_UID"), os.getenv("HOST_GID")
+    if uid and gid:
+        uid_int, gid_int = int(uid), int(gid)
+        for item in [Path("/output"), *Path("/output").rglob("*")]:
+            try:
+                os.chown(item, uid_int, gid_int, follow_symlinks=False)
+            except OSError:
+                pass
     print("HTTP multipart API: реальный WAV-ответ сохранён в output/api-answer.wav.")
 
 

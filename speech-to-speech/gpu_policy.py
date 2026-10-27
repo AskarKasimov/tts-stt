@@ -17,7 +17,9 @@ def validate_gpu(total_bytes, free_bytes, capability):
     if free_bytes < required:
         raise RuntimeError(
             f"Для запуска Qwen рядом с STT/TTS нужно {required / 1024**3:.1f} GiB свободной VRAM; "
-            f"доступно {free_bytes / 1024**3:.1f} GiB. Общая память карты: {total_bytes / 1024**3:.1f} GiB."
+            f"доступно {free_bytes / 1024**3:.1f} GiB. Общая память карты: {total_bytes / 1024**3:.1f} GiB. "
+            "Если GigaAM/VoxCPM2 удерживают кэш PyTorch, перезапустите их: "
+            "docker compose restart gigaam voxcpm2"
         )
     return {
         "qwen_budget_gib": round(total_bytes * POLICY["qwen_memory_fraction"] / 1024**3, 2),

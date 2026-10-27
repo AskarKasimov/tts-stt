@@ -16,6 +16,22 @@ VERSIONS = json.loads((ROOT / "versions.json").read_text())
 PREPARED = Path("/models/prepared.json")
 
 
+def fix_host_permissions(*paths):
+    uid, gid = os.getenv("HOST_UID"), os.getenv("HOST_GID")
+    if not uid or not gid:
+        return
+    uid_int, gid_int = int(uid), int(gid)
+    for root_path in paths:
+        root_path = Path(root_path)
+        if not root_path.exists():
+            continue
+        for item in [root_path, *root_path.rglob("*")]:
+            try:
+                os.chown(item, uid_int, gid_int, follow_symlinks=False)
+            except OSError:
+                pass
+
+
 def gpu_check():
     import torch
 
@@ -49,6 +65,7 @@ def gpu_check():
     }
     Path("/output").mkdir(exist_ok=True)
     Path("/output/gpu-check.json").write_text(json.dumps(report, indent=2))
+    fix_host_permissions("/output")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 
@@ -109,6 +126,7 @@ def prepare():
     checked = validate_checkpoint(path)
     manifest = {**checked, "model_id": VERSIONS["model_id"], "revision": VERSIONS["model_revision"]}
     PREPARED.write_text(json.dumps(manifest, indent=2))
+    fix_host_permissions("/models")
     print("Веса скачаны и проверены. Можно запускать сервис.", flush=True)
 
 

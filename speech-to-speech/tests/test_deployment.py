@@ -92,6 +92,15 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Сначала"):
                 runtime.serve()
 
+    def test_fix_host_permissions_chowns_nested_files(self):
+        nested = self.path / "sub" / "file.txt"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("ok")
+        with patch.dict("os.environ", {"HOST_UID": "1001", "HOST_GID": "1002"}), patch("os.chown") as chown:
+            runtime.fix_host_permissions(self.path)
+            self.assertTrue(chown.called)
+            self.assertEqual(chown.call_args.args[1:], (1001, 1002))
+
 
 class ClientTests(unittest.TestCase):
     def test_silence_rejected(self):
