@@ -14,6 +14,7 @@ on:
 jobs:
   cpu-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,7 +23,11 @@ jobs:
       - name: Install HTTP test dependencies
         run: python3 -m pip install -c speech-to-speech/constraints.lock packaging fastapi httpx python-multipart prometheus-client
       - name: Install audio decoder
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install -y ffmpeg
+          fi
       - name: Check failure handling without model weights
         run: python3 -m unittest discover -s speech-to-speech/tests -v
       - name: Check launcher and Docker Compose syntax
