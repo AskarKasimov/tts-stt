@@ -24,9 +24,14 @@ docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
 ### Qwen3-Omni (Speech-to-Speech)
 Запускается **независимым** compose-файлом из корня (не затрагивает STT/TTS):
 ```bash
+# 1. Скачать веса модели 26.3 ГБ (разово при первом запуске):
+docker compose -f docker-compose.qwen.yaml run --rm download
+
+# 2. Запустить сервисы:
 docker compose -f docker-compose.qwen.yaml up -d --build
 ```
-> *Примечание: для первого запуска с автоматической проверкой окружения и GPU-памяти можно использовать скрипт: `cd speech-to-speech && ./run.sh install`.*
+> *Рекомендуемый способ первого запуска с автоматической проверкой хоста, VRAM и аудио-тестом:*  
+> `cd speech-to-speech && ./run.sh install`
 
 * **Qwen3-Omni Healthcheck:** `curl http://localhost:8002/health`
 * **Внутренний движок Omni:** `http://127.0.0.1:8091`
