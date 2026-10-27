@@ -1,0 +1,67 @@
+name: qwen3-speech
+services:
+  omni:
+    image: tts-stt/qwen3-omni-int4:9842ebc
+    build: .
+    platform: linux/amd64
+    init: true
+    shm_size: "8gb"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
+    volumes:
+      - ${S2S_DATA_DIR:-./data}:/models
+      - ./output:/output
+    ports:
+      - "127.0.0.1:${S2S_PORT:-8091}:8091"
+    deploy:
+      # On the existing single-GPU server this is the STT/TTS card too.
+      # Omni budgets 70% VRAM in deploy.yaml; other services keep their containers.
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "/opt/s2s/runtime.py", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 20m
+    stop_grace_period: 60s
+    # Startup failures stay visible; avoid an endless GPU crash/restart loop.
+    restart: "no"
+  api:
+    image: tts-stt/qwen3-omni-int4:9842ebc
+    platform: linux/amd64
+    init: true
+    entrypoint: [uvicorn, "api:app", --host, "0.0.0.0", --port, "8000", --workers, "1"]
+    environment:
+      OMNI_URL: http://omni:8091
+      NVIDIA_VISIBLE_DEVICES: void
+    ports:
+      - "${S2S_API_BIND:-0.0.0.0}:${S2S_API_PORT:-8002}:8000"
+    depends_on:
+      omni:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=7)"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 30s
+    restart: unless-stopped
+  download:
+    image: tts-stt/qwen3-omni-int4:9842ebc
+    platform: linux/amd64
+    profiles: [tools]
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
+      NVIDIA_VISIBLE_DEVICES: void
+    volumes:
+      - ${S2S_DATA_DIR:-./data}:/models
+    command: [prepare]

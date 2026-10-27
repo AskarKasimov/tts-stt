@@ -1,0 +1,6 @@
+.env
+data
+output
+reports
+tests
+__pycache__

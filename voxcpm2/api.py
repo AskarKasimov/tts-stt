@@ -1,3 +1,4 @@
+import gc
 import hashlib
 import io
 import json
@@ -195,30 +196,47 @@ def _generate_target(model, request: SynthesisRequest, text: str, reference: str
     return audio
 
 
+def _release_cuda_cache():
+    gc.collect()
+    if DEVICE.startswith("cuda"):
+        try:
+            import torch
+
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 def _synthesize(request: SynthesisRequest) -> bytes:
     with _model_lock:
-        model = _load_model()
-        reference = _reference_for(model, request)
-        audio = _generate_target(model, request, request.text, reference)
-        output = io.BytesIO()
-        sf.write(output, audio, model.tts_model.sample_rate, format="WAV")
-        return output.getvalue()
+        try:
+            model = _load_model()
+            reference = _reference_for(model, request)
+            audio = _generate_target(model, request, request.text, reference)
+            output = io.BytesIO()
+            sf.write(output, audio, model.tts_model.sample_rate, format="WAV")
+            return output.getvalue()
+        finally:
+            _release_cuda_cache()
 
 
 def _synthesize_longform(request: SynthesisRequest) -> bytes:
     chunks = split_text(request.text)
     with _model_lock:
-        model = _load_model()
-        reference = _reference_for(model, request)
-        sample_rate = model.tts_model.sample_rate
-        output = io.BytesIO()
-        with sf.SoundFile(output, mode="w", samplerate=sample_rate, channels=1, format="WAV") as wav:
-            for index, chunk in enumerate(chunks):
-                audio = _generate_target(model, request, chunk, reference)
-                wav.write(audio)
-                if index < len(chunks) - 1:
-                    wav.write([0.0] * int(sample_rate * CHUNK_PAUSE_SECONDS))
-        return output.getvalue()
+        try:
+            model = _load_model()
+            reference = _reference_for(model, request)
+            sample_rate = model.tts_model.sample_rate
+            output = io.BytesIO()
+            with sf.SoundFile(output, mode="w", samplerate=sample_rate, channels=1, format="WAV") as wav:
+                for index, chunk in enumerate(chunks):
+                    audio = _generate_target(model, request, chunk, reference)
+                    wav.write(audio)
+                    if index < len(chunks) - 1:
+                        wav.write([0.0] * int(sample_rate * CHUNK_PAUSE_SECONDS))
+            return output.getvalue()
+        finally:
+            _release_cuda_cache()
 
 
 def wav_duration_seconds(audio: bytes) -> float | None:

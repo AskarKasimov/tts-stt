@@ -242,8 +242,10 @@ def create_app(
                         clear_error_frames(exc)
                         raise
                     finally:
-                        # Do not retain an evicted model in a completed request.
+                        # Do not retain an evicted model in a completed request,
+                        # and release cached CUDA blocks so shared GPU services have headroom.
                         del selected_model
+                        release_model_memory()
             except ImportError as exc:
                 if longform:
                     raise HTTPException(

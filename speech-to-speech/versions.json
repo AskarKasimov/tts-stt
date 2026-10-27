@@ -1,0 +1,9 @@
+{
+  "model_id": "Intel/Qwen3-Omni-30B-A3B-Instruct-int4-AutoRound",
+  "model_revision": "c3ef7bbf0b9d866866136c1d08b6314d27f7e151",
+  "model_tensor_bytes": 26258064482,
+  "served_model_name": "qwen3-omni-speech",
+  "omni_commit": "9842ebc17cf1d9c6b440ecb6a79039162f68a1dd",
+  "vllm_version": "0.32.0",
+  "minimum_driver": "580.95.05"
+}
