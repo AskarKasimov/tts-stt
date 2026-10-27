@@ -22,16 +22,28 @@ docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d --build
 * **Grafana:** `http://<адрес-сервера>:18473` (логин/пароль настраиваются в `.env`)
 
 ### Qwen3-Omni (Speech-to-Speech)
-Запускается **независимым** compose-файлом из корня (не затрагивает STT/TTS):
-```bash
-# 1. Скачать веса модели 26.3 ГБ (разово при первом запуске):
-docker compose -f docker-compose.qwen.yaml run --rm download
+Qwen работает на той же GPU 80 ГБ рядом с GigaAM и VoxCPM2 (требует $\ge 60$ ГБ свободной VRAM перед стартом).
 
-# 2. Запустить сервисы:
-docker compose -f docker-compose.qwen.yaml up -d --build
+#### Первый запуск с нуля («под ключ»)
+Перед запуском обязательно сбросьте кэш видеопамяти у соседних сервисов и запустите единый скрипт установки (проверит сервер, драйвер и GPU, скачает 26,3 ГБ весов, запустит контейнеры и проверит синтез аудио):
+
+```bash
+# 1. Обязательно сбросить кэш VRAM у работающих STT/TTS:
+docker compose restart gigaam voxcpm2
+
+# 2. Установка, скачивание весов и запуск с проверкой (рекомендуется в tmux):
+cd speech-to-speech && ./run.sh install
 ```
-> *Рекомендуемый способ первого запуска с автоматической проверкой хоста, VRAM и аудио-тестом:*  
-> `cd speech-to-speech && ./run.sh install`
+> Команда завершится сообщением: `Сервис запущен, техническая проверка аудио пройдена. Прослушайте output/test-answer.wav`.
+
+#### Последующий запуск и управление (из корня репозитория)
+Когда веса уже скачаны, сервисом можно управлять прямо из корня через независимый Compose:
+```bash
+docker compose -f docker-compose.qwen.yaml up -d
+docker compose -f docker-compose.qwen.yaml ps
+docker compose -f docker-compose.qwen.yaml logs -f
+docker compose -f docker-compose.qwen.yaml down
+```
 
 * **Qwen3-Omni Healthcheck:** `curl http://localhost:8002/health`
 * **Внутренний движок Omni:** `http://127.0.0.1:8091`
