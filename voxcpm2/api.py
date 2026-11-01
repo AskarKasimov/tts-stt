@@ -80,6 +80,11 @@ class SynthesisRequest(BaseModel):
         description="Create or reuse a persistent reference voice for seed, CFG and inference steps.",
     )
 
+    use_prompt: bool = Field(
+        default=True,
+        description="Use the reference audio and its text as a continuation prompt.",
+    )
+
     @model_validator(mode="after")
     def reference_requires_seed(self):
         if self.use_reference and self.seed is None:
@@ -181,6 +186,9 @@ def _generate_target(model, request: SynthesisRequest, text: str, reference: str
     options = {}
     if reference is not None:
         options["reference_wav_path"] = reference
+        if request.use_prompt:
+            options["prompt_wav_path"] = reference
+            options["prompt_text"] = REFERENCE_TEXT
     audio = model.generate(
         text=text,
         cfg_value=request.cfg_value,

@@ -47,6 +47,8 @@ def test_default_request_creates_reference_then_returns_only_target_audio(monkey
     assert reference["retry_badcase"] is False
     assert "reference_wav_path" not in reference
     assert target["text"] == "Нужный ответ."
+    assert target["prompt_wav_path"] == target["reference_wav_path"]
+    assert target["prompt_text"] == api.REFERENCE_TEXT
     assert Path(target["reference_wav_path"]).parent == cache_dir
     audio, _ = sf.read(io.BytesIO(response.content))
     assert len(audio) == 480
@@ -101,6 +103,8 @@ def test_disabled_reference_does_not_read_or_create_cache(monkeypatch, cache_dir
     assert response.status_code == 200
     assert len(model.calls) == 1
     assert "reference_wav_path" not in model.calls[0]
+    assert "prompt_wav_path" not in model.calls[0]
+    assert "prompt_text" not in model.calls[0]
     assert model.calls[0]["seed"] is None
     assert not cache_dir.exists()
 
@@ -112,6 +116,8 @@ def test_long_text_uses_one_reference_for_every_chunk(monkeypatch, cache_dir):
     assert response.status_code == 200
     assert len(model.calls) == 4
     paths = [call["reference_wav_path"] for call in model.calls[1:]]
+    assert all(call["prompt_wav_path"] == call["reference_wav_path"] for call in model.calls[1:])
+    assert all(call["prompt_text"] == api.REFERENCE_TEXT for call in model.calls[1:])
     assert len(set(paths)) == 1
     assert [len(call["text"]) for call in model.calls[1:]] == [500, 500, 1]
 
@@ -180,3 +186,15 @@ def test_reference_with_null_seed_is_rejected_before_loading_model(monkeypatch, 
     assert TestClient(api.app).post("/synthesize", json={
         "text": "Ответ", "seed": None, "use_reference": True,
     }).status_code == 422
+
+
+def test_reference_only_mode_omits_prompt(monkeypatch, cache_dir):
+    model = RecordingModel()
+    monkeypatch.setattr(api, "_load_model", lambda: model)
+    response = TestClient(api.app).post("/synthesize", json={
+        "text": "Ответ", "use_prompt": False,
+    })
+    assert response.status_code == 200
+    assert "reference_wav_path" in model.calls[-1]
+    assert "prompt_wav_path" not in model.calls[-1]
+    assert "prompt_text" not in model.calls[-1]
