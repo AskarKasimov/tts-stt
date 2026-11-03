@@ -197,6 +197,7 @@ class VoxCPM:
         retry_badcase_ratio_threshold: float = 6.0,
         streaming: bool = False,
         seed: Optional[int] = None,
+        prompt_cache: Optional[dict] = None,
     ) -> Generator[np.ndarray, None, None]:
         """Synthesize speech for the given text and return a single waveform.
 
@@ -220,6 +221,7 @@ class VoxCPM:
             retry_badcase_ratio_threshold: Threshold for audio-to-text ratio.
             streaming: Whether to return a generator of audio chunks.
             seed: Optional random seed for reproducibility.
+            prompt_cache: Prebuilt audio features; cannot be combined with audio paths or denoising.
         Returns:
             Generator of numpy.ndarray: 1D waveform array (float32) on CPU.
             Yields audio chunks for each generation step if ``streaming=True``,
@@ -227,6 +229,10 @@ class VoxCPM:
         """
         if not isinstance(text, str) or not text.strip():
             raise ValueError("target text must be a non-empty string")
+
+        if prompt_cache is not None and (prompt_wav_path is not None or prompt_text is not None
+                                         or reference_wav_path is not None or denoise):
+            raise ValueError("prompt_cache cannot be combined with audio paths or denoising")
 
         if prompt_wav_path is not None:
             if not os.path.exists(prompt_wav_path):
@@ -263,7 +269,9 @@ class VoxCPM:
                     self.denoiser.enhance(reference_wav_path, output_path=temp_files[-1])
                     actual_ref_path = temp_files[-1]
 
-            if actual_prompt_path is not None or actual_ref_path is not None:
+            if prompt_cache is not None:
+                fixed_prompt_cache = prompt_cache
+            elif actual_prompt_path is not None or actual_ref_path is not None:
                 if is_v2:
                     fixed_prompt_cache = self.tts_model.build_prompt_cache(
                         prompt_text=prompt_text,

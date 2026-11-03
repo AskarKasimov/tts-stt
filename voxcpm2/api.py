@@ -182,13 +182,18 @@ def _reference_for(model, request: SynthesisRequest) -> str | None:
     return str(path)
 
 
-def _generate_target(model, request: SynthesisRequest, text: str, reference: str | None):
-    options = {}
-    if reference is not None:
-        options["reference_wav_path"] = reference
-        if request.use_prompt:
-            options["prompt_wav_path"] = reference
-            options["prompt_text"] = REFERENCE_TEXT
+def _prompt_cache_for(model, request: SynthesisRequest, reference: str | None):
+    if reference is None:
+        return None
+    options = {"reference_wav_path": reference}
+    if request.use_prompt:
+        options["prompt_wav_path"] = reference
+        options["prompt_text"] = REFERENCE_TEXT + " "
+    return model.tts_model.build_prompt_cache(**options)
+
+
+def _generate_target(model, request: SynthesisRequest, text: str, reference: str | None, prompt_cache):
+    options = {"prompt_cache": prompt_cache} if prompt_cache is not None else {}
     audio = model.generate(
         text=text,
         cfg_value=request.cfg_value,
@@ -207,7 +212,8 @@ def _synthesize(request: SynthesisRequest) -> bytes:
     with _model_lock:
         model = _load_model()
         reference = _reference_for(model, request)
-        audio = _generate_target(model, request, request.text, reference)
+        prompt_cache = _prompt_cache_for(model, request, reference)
+        audio = _generate_target(model, request, request.text, reference, prompt_cache)
         output = io.BytesIO()
         sf.write(output, audio, model.tts_model.sample_rate, format="WAV")
         return output.getvalue()
@@ -219,10 +225,11 @@ def _synthesize_longform(request: SynthesisRequest) -> bytes:
         model = _load_model()
         reference = _reference_for(model, request)
         sample_rate = model.tts_model.sample_rate
+        prompt_cache = _prompt_cache_for(model, request, reference)
         output = io.BytesIO()
         with sf.SoundFile(output, mode="w", samplerate=sample_rate, channels=1, format="WAV") as wav:
             for index, chunk in enumerate(chunks):
-                audio = _generate_target(model, request, chunk, reference)
+                audio = _generate_target(model, request, chunk, reference, prompt_cache)
                 wav.write(audio)
                 if index < len(chunks) - 1:
                     wav.write([0.0] * int(sample_rate * CHUNK_PAUSE_SECONDS))
