@@ -17,14 +17,19 @@ def cache_dir(monkeypatch, tmp_path):
 
 
 class RecordingModel:
-    tts_model = type("TTS", (), {"sample_rate": 48000})()
-
     def __init__(self):
         self.calls = []
+        self.cache_calls = []
+        self.tts_model = self
+        self.sample_rate = 48000
+
+    def build_prompt_cache(self, **kwargs):
+        self.cache_calls.append(kwargs)
+        return kwargs
 
     def generate(self, **kwargs):
         self.calls.append(kwargs)
-        reference = kwargs.get("reference_wav_path")
+        reference = kwargs.get("reference_wav_path") or (kwargs.get("prompt_cache") or {}).get("reference_wav_path")
         if reference:
             audio, rate = sf.read(reference)
             assert rate == 48000
@@ -47,7 +52,10 @@ def test_default_request_creates_reference_then_returns_only_target_audio(monkey
     assert reference["retry_badcase"] is False
     assert "reference_wav_path" not in reference
     assert target["text"] == "Нужный ответ."
-    assert Path(target["reference_wav_path"]).parent == cache_dir
+    cache = target["prompt_cache"]
+    assert cache["prompt_wav_path"] == cache["reference_wav_path"]
+    assert cache["prompt_text"] == api.REFERENCE_TEXT + " "
+    assert Path(cache["reference_wav_path"]).parent == cache_dir
     audio, _ = sf.read(io.BytesIO(response.content))
     assert len(audio) == 480
     assert np.allclose(audio, 0.1, atol=1e-4)
@@ -58,12 +66,12 @@ def test_reference_is_reused_after_model_restart_and_float_normalization(monkeyp
     monkeypatch.setattr(api, "_load_model", lambda: model)
     client = TestClient(api.app)
     assert client.post("/synthesize", json={"text": "Первый", "cfg_value": 2}).status_code == 200
-    original = model.calls[-1].get("reference_wav_path")
+    original = model.calls[-1]["prompt_cache"]["reference_wav_path"]
     restarted = RecordingModel()
     monkeypatch.setattr(api, "_load_model", lambda: restarted)
     assert client.post("/synthesize", json={"text": "Другой", "cfg_value": 2.0}).status_code == 200
     assert len(restarted.calls) == 1
-    assert restarted.calls[0]["reference_wav_path"] == original
+    assert restarted.calls[0]["prompt_cache"]["reference_wav_path"] == original
     assert len(list(cache_dir.glob("*.wav"))) == 1
 
 
@@ -77,7 +85,7 @@ def test_each_parameter_selects_a_different_reference(monkeypatch, cache_dir, ch
     assert client.post("/synthesize", json={"text": "Первый"}).status_code == 200
     assert client.post("/synthesize", json={"text": "Второй", **change}).status_code == 200
     assert len(list(cache_dir.glob("*.wav"))) == 2
-    assert model.calls[1]["reference_wav_path"] != model.calls[3]["reference_wav_path"]
+    assert model.calls[1]["prompt_cache"]["reference_wav_path"] != model.calls[3]["prompt_cache"]["reference_wav_path"]
 
 
 @pytest.mark.parametrize("constant", ["MODEL_ID", "REFERENCE_TEXT"])
@@ -101,6 +109,8 @@ def test_disabled_reference_does_not_read_or_create_cache(monkeypatch, cache_dir
     assert response.status_code == 200
     assert len(model.calls) == 1
     assert "reference_wav_path" not in model.calls[0]
+    assert "prompt_wav_path" not in model.calls[0]
+    assert "prompt_text" not in model.calls[0]
     assert model.calls[0]["seed"] is None
     assert not cache_dir.exists()
 
@@ -111,8 +121,11 @@ def test_long_text_uses_one_reference_for_every_chunk(monkeypatch, cache_dir):
     response = TestClient(api.app).post("/synthesize", json={"text": "а" * 1001})
     assert response.status_code == 200
     assert len(model.calls) == 4
-    paths = [call["reference_wav_path"] for call in model.calls[1:]]
-    assert len(set(paths)) == 1
+    assert len(model.cache_calls) == 1
+    cache = model.cache_calls[0]
+    assert cache["prompt_wav_path"] == cache["reference_wav_path"]
+    assert cache["prompt_text"] == api.REFERENCE_TEXT + " "
+    assert all(call["prompt_cache"] is cache for call in model.calls[1:])
     assert [len(call["text"]) for call in model.calls[1:]] == [500, 500, 1]
 
 
@@ -152,7 +165,7 @@ def test_corrupt_cached_reference_is_regenerated(monkeypatch, cache_dir):
     monkeypatch.setattr(api, "_load_model", lambda: model)
     client = TestClient(api.app)
     assert client.post("/synthesize", json={"text": "Ответ"}).status_code == 200
-    Path(model.calls[-1]["reference_wav_path"]).write_bytes(b"broken")
+    Path(model.calls[-1]["prompt_cache"]["reference_wav_path"]).write_bytes(b"broken")
     model.calls.clear()
     assert client.post("/synthesize", json={"text": "Ответ"}).status_code == 200
     assert len(model.calls) == 2
@@ -180,3 +193,16 @@ def test_reference_with_null_seed_is_rejected_before_loading_model(monkeypatch, 
     assert TestClient(api.app).post("/synthesize", json={
         "text": "Ответ", "seed": None, "use_reference": True,
     }).status_code == 422
+
+
+def test_reference_only_mode_omits_prompt(monkeypatch, cache_dir):
+    model = RecordingModel()
+    monkeypatch.setattr(api, "_load_model", lambda: model)
+    response = TestClient(api.app).post("/synthesize", json={
+        "text": "Ответ", "use_prompt": False,
+    })
+    assert response.status_code == 200
+    cache = model.calls[-1]["prompt_cache"]
+    assert cache["reference_wav_path"]
+    assert "prompt_wav_path" not in cache
+    assert "prompt_text" not in cache
