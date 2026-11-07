@@ -177,9 +177,6 @@ class ReceiverMiddleware:
                 except TimeoutError:
                     # Keep the model reserved until the inference thread actually exits.
                     raise Rejected(504, "execution_timeout", "uncertain") from None
-                finally:
-                    if task.done():
-                        self.worker_busy = False
             fingerprint = hashlib.sha256(
                 scope["query_string"] + b"\0" + canonical
             ).hexdigest()

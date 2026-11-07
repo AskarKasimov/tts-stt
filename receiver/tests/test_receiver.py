@@ -384,7 +384,10 @@ def test_remote_instances_and_held_transport_failure(tmp_path):
             a = await engine.submit("dev", "normal", "A", b"A", "x", b"")
             b = await engine.submit("server", "high", "B", b"B", "x", b"")
             await until(
-                lambda: engine.jobs[a].get("held") or engine.jobs[b].get("held")
+                lambda: (
+                    (engine.jobs[a].get("held") or engine.jobs[b].get("held"))
+                    and "model-b" in calls
+                )
             )
             assert "model-a" in calls and "model-b" in calls
             held = [j for j in engine.jobs.values() if j.get("held")]
@@ -592,7 +595,7 @@ def test_retention_removes_finished_records_and_payloads(tmp_path):
             await engine.detach(job)
             await until(lambda: job not in engine.jobs)
             assert job not in journal.records
-            assert not list(tmp_path.glob("*.blob"))
+            await until(lambda: not list(tmp_path.glob("*.blob")))
             with pytest.raises(Rejected) as expired:
                 await engine.response(job)
             assert expired.value.status == 404
@@ -679,7 +682,9 @@ def test_slow_blob_io_keeps_health_metrics_and_auth_responsive(
     asyncio.run(scenario())
 
 
-def test_blob_cancellation_drains_writer_before_next_quota_check(tmp_path, monkeypatch):
+def test_blob_cancellation_drains_writer_and_reserved_quota_stays_bounded(
+    tmp_path, monkeypatch
+):
     import threading
 
     async def scenario():
@@ -688,29 +693,26 @@ def test_blob_cancellation_drains_writer_before_next_quota_check(tmp_path, monke
             config(tmp_path, max_payload_bytes=4), MemoryJournal(), lambda *_: None
         )
         await engine.start(dispatch=False)
-        original = engine.blobs.put
-        calls = []
+        original = engine.blobs.sync
 
-        def slow(data):
-            calls.append(data)
+        def slow_sync():
             entered.set()
             assert release.wait(3)
-            return original(data)
+            return original()
 
-        monkeypatch.setattr(engine.blobs, "put", slow)
+        monkeypatch.setattr(engine.blobs, "sync", slow_sync)
         first = asyncio.create_task(engine.store_payload(b"full"))
         try:
             await until(entered.is_set)
             first.cancel()
-            second = asyncio.create_task(engine.store_payload(b"x"))
-            await asyncio.sleep(0.02)
-            assert calls == [b"full"] and not first.done()
+            async with asyncio.timeout(0.5):
+                with pytest.raises(Rejected) as quota:
+                    await engine.store_payload(b"x")
+                assert quota.value.reason == "payload_quota"
+            assert not first.done() and engine.blobs.used == 4
             release.set()
             with pytest.raises(asyncio.CancelledError):
                 await first
-            with pytest.raises(Rejected) as quota:
-                await second
-            assert quota.value.reason == "payload_quota"
             assert engine.blobs.used == 4
         finally:
             release.set()
@@ -906,3 +908,280 @@ def test_failure_logs_safe_operation_stage_and_error_type(
     if failure == "payload":
         assert any(record.get("errno") == 28 for record in records)
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("remaining", [0, 1])
+def test_not_started_retry_cancels_only_when_all_waiters_left(
+    tmp_path, status, remaining
+):
+    async def scenario():
+        cfg = config(tmp_path)
+        cfg.instances = [
+            {
+                "id": "worker",
+                "url": "http://worker/synthesize",
+                "token": HIGH,
+                "slots": 1,
+            }
+        ]
+        journal = MemoryJournal()
+        engine = Engine(cfg, journal, lambda *_: None)
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def worker(_):
+            calls.append(True)
+            if len(calls) == 1:
+                entered.set()
+                await release.wait()
+                return httpx.Response(
+                    status, headers={"x-voice-execution-state": "not-started"}
+                )
+            return httpx.Response(
+                200, content=b"wav", headers={"x-voice-execution-state": "finished"}
+            )
+
+        await engine.http.aclose()
+        engine.http = httpx.AsyncClient(transport=httpx.MockTransport(worker))
+        await engine.start()
+        try:
+            job = await engine.submit("dev", "normal", "same", b"body", "x", b"")
+            await entered.wait()
+            if remaining:
+                assert (
+                    await engine.submit("dev", "normal", "same", b"body", "x", b"")
+                    == job
+                )
+            await engine.detach(job)
+            assert engine.jobs[job]["state"] == "running"
+            release.set()
+            if remaining:
+                assert (await engine.response(job))[2] == b"wav"
+                assert len(calls) == 2
+            else:
+                with pytest.raises(Rejected) as cancelled:
+                    await engine.response(job)
+                assert cancelled.value.reason == "cancelled"
+                assert cancelled.value.execution == "not-started"
+                assert not engine.jobs[job].get("held")
+                assert journal.records[job]["reason"] == "cancelled"
+                await asyncio.sleep(0.4)
+                assert len(calls) == 1
+        finally:
+            release.set()
+            await engine.close()
+
+    asyncio.run(scenario())
+
+
+def test_worker_slow_response_cannot_release_another_inference_slot(tmp_path):
+    from speech_receiver.http import ReceiverMiddleware
+
+    async def scenario():
+        started_second, release_second = asyncio.Event(), asyncio.Event()
+        sending_first, release_first = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def model(scope, receive, send):
+            calls.append(True)
+            if len(calls) == 2:
+                started_second.set()
+                await release_second.wait()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"audio/wav")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b"wav"})
+
+        middleware = ReceiverMiddleware(
+            model, config(tmp_path, mode="worker"), {}, lambda _: None
+        )
+
+        async def request(slow=False):
+            messages = []
+
+            async def receive():
+                return {
+                    "type": "http.request",
+                    "body": b'{"text":"hello"}',
+                    "more_body": False,
+                }
+
+            async def send(message):
+                if slow and message["type"] == "http.response.start":
+                    sending_first.set()
+                    await release_first.wait()
+                messages.append(message)
+
+            scope = middleware.scope("application/json", b"")
+            scope["headers"].append((b"authorization", ("Bearer " + NORMAL).encode()))
+            await middleware(scope, receive, send)
+            return messages[0]["status"]
+
+        first = asyncio.create_task(request(slow=True))
+        second = None
+        try:
+            await asyncio.wait_for(sending_first.wait(), 2)
+            second = asyncio.create_task(request())
+            await asyncio.wait_for(started_second.wait(), 2)
+            release_first.set()
+            assert await first == 200
+            assert await request() == 429
+            assert len(calls) == 2
+            release_second.set()
+            assert await second == 200
+            assert await request() == 200
+        finally:
+            release_first.set()
+            release_second.set()
+            await asyncio.gather(
+                *[t for t in (first, second) if t is not None], return_exceptions=True
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stage", ["put", "get", "remove"])
+def test_slow_blob_io_does_not_hold_state_lock_for_high_admission_or_timeout(
+    tmp_path, monkeypatch, stage
+):
+    import threading
+
+    async def scenario():
+        entered, release = threading.Event(), threading.Event()
+        running, finish_inference = asyncio.Event(), asyncio.Event()
+
+        async def execute(body, *_):
+            if body == b"hold":
+                running.set()
+                await finish_inference.wait()
+            return 200, "audio/wav", b"wav:" + body
+
+        engine = Engine(
+            config(tmp_path, queue_timeout=0.1, retention=0.05),
+            MemoryJournal(),
+            execute,
+        )
+        await engine.start()
+        slow_task = None
+        result = None
+        try:
+            if stage == "get":
+                result = await engine.submit(
+                    "dev", "normal", "result", b"result", "x", b""
+                )
+                await engine.response(result)
+                await engine.detach(result)
+                target = engine.jobs[result]["output"]
+            await engine.submit("dev", "normal", "hold", b"hold", "x", b"")
+            await running.wait()
+            if stage == "remove":
+                deleting = await engine.submit(
+                    "dev", "normal", "delete", b"delete", "x", b""
+                )
+                target = engine.jobs[deleting]["input"]
+            original = getattr(engine.blobs, stage)
+
+            def slow(value, *args):
+                if (stage == "put" and value == b"slow") or (
+                    stage != "put" and value == target
+                ):
+                    entered.set()
+                    assert release.wait(3), "unrelated state operations blocked on disk"
+                return original(value, *args)
+
+            monkeypatch.setattr(engine.blobs, stage, slow)
+            if stage == "put":
+                slow_task = asyncio.create_task(
+                    engine.submit("dev", "normal", "slow", b"slow", "x", b"")
+                )
+            elif stage == "get":
+                slow_task = asyncio.create_task(engine.response(result))
+            else:
+                slow_task = asyncio.create_task(engine.detach(deleting))
+            await until(entered.is_set)
+            async with asyncio.timeout(0.5):
+                high = await engine.submit("server", "high", "high", b"high", "x", b"")
+                assert engine.jobs[high]["priority"] == "high"
+                expiring = await engine.submit(
+                    "dev", "normal", "expiring", b"expire", "x", b""
+                )
+                with pytest.raises(Rejected) as timeout:
+                    await engine.response(expiring)
+                assert timeout.value.reason == "queue_timeout"
+                assert timeout.value.execution == "not-started"
+            assert not release.is_set()
+            if stage == "get":
+                await asyncio.sleep(0.25)
+                assert result in engine.jobs  # retention cannot delete a pinned read
+            release.set()
+            await slow_task
+            if stage == "get":
+                await until(lambda: result not in engine.jobs)
+        finally:
+            release.set()
+            finish_inference.set()
+            if slow_task is not None:
+                await asyncio.gather(slow_task, return_exceptions=True)
+            await engine.close()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_pending_admissions_share_idempotency_and_reserve_queue_limits(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    async def scenario():
+        entered, release = threading.Event(), threading.Event()
+        cfg = config(tmp_path, max_normal=1)
+        engine = Engine(cfg, MemoryJournal(), lambda *_: None)
+        await engine.start(dispatch=False)
+        original = engine.blobs.put
+        writes = []
+
+        def slow(data):
+            writes.append(data)
+            if data == b"same":
+                entered.set()
+                assert release.wait(3)
+            return original(data)
+
+        monkeypatch.setattr(engine.blobs, "put", slow)
+        first = asyncio.create_task(
+            engine.submit("dev", "normal", "same", b"same", "x", b"")
+        )
+        duplicate = None
+        try:
+            await until(entered.is_set)
+            duplicate = asyncio.create_task(
+                engine.submit("dev", "normal", "same", b"same", "x", b"")
+            )
+            await asyncio.sleep(0.01)
+            with pytest.raises(Rejected) as conflict:
+                await engine.submit("dev", "normal", "same", b"different", "x", b"")
+            assert conflict.value.status == 409
+            with pytest.raises(Rejected) as full:
+                await engine.submit("dev", "normal", "another", b"another", "x", b"")
+            assert full.value.reason == "queue_full"
+            high = await engine.submit("server", "high", "high", b"high", "x", b"")
+            assert high in engine.jobs
+            release.set()
+            job = await first
+            assert await duplicate == job
+            assert engine.waiters[job] == 2
+            assert writes.count(b"same") == 1
+        finally:
+            release.set()
+            await asyncio.gather(
+                *[t for t in (first, duplicate) if t is not None],
+                return_exceptions=True,
+            )
+            await engine.close()
+
+    asyncio.run(scenario())

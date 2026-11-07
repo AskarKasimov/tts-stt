@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +33,7 @@ class Blobs:
             self.lock.close()
             raise RuntimeError("receiver data volume already owned") from None
         self.limit = limit
+        self.quota_lock = threading.Lock()
         self.used = sum(p.stat().st_size for p in self.path.glob("*.blob"))
         for p in self.path.glob(".tmp-*"):
             p.unlink()
@@ -47,8 +49,12 @@ class Blobs:
 
     def put(self, data):
         name = uuid.uuid4().hex + uuid.uuid4().hex + ".blob"
-        if self.used + len(data) > self.limit:
-            raise Rejected(503, "payload_quota")
+        # Reserve quota before disk I/O; the lock protects only arithmetic.
+        # A failed write freezes admission until a restart scans actual usage.
+        with self.quota_lock:
+            if self.used + len(data) > self.limit:
+                raise Rejected(503, "payload_quota")
+            self.used += len(data)
         fd, temp = tempfile.mkstemp(prefix=".tmp-", dir=self.path)
         try:
             with os.fdopen(fd, "wb") as file:
@@ -57,7 +63,6 @@ class Blobs:
                 os.fsync(file.fileno())
             os.replace(temp, self.file(name))
             self.sync()
-            self.used += len(data)
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
@@ -72,11 +77,14 @@ class Blobs:
 
     def remove(self, name):
         path = self.file(name)
-        if path.exists():
+        try:
             size = path.stat().st_size
             path.unlink()
+        except FileNotFoundError:
+            return
+        with self.quota_lock:
             self.used -= size
-            self.sync()
+        self.sync()
 
     def sync(self):
         fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY)
@@ -114,9 +122,11 @@ class Engine:
             self.blobs.close()
             raise
         self.io_pool = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="receiver-blobs"
+            max_workers=2, thread_name_prefix="receiver-blobs"
         )
-        self.io_lock = asyncio.Lock()
+        self.io_slots = asyncio.Semaphore(2)
+        self.admissions, self.readers, self.deleting = {}, {}, set()
+        self.cleanup_tasks = set()
         self.jobs, self.waiters, self.tasks = {}, {}, set()
         self.lock, self.changed, self.fatal = (
             asyncio.Lock(),
@@ -197,10 +207,10 @@ class Engine:
         logging.error(json.dumps(fields))
 
     async def blob_io(self, stage, function, *args):
-        # A single worker serializes quota accounting. Only one filesystem call
-        # is submitted at a time, and cancellation must drain it before the
-        # state lock can be released or the volume closed.
-        async with self.io_lock:
+        # Bound running/submitted work without blocking the state lock. One
+        # slow operation leaves another worker available. Cancellation drains
+        # its operation before releasing its slot or closing the volume.
+        async with self.io_slots:
             future = asyncio.get_running_loop().run_in_executor(
                 self.io_pool, partial(function, *args)
             )
@@ -344,6 +354,8 @@ class Engine:
         ):
             raise Rejected(422, "invalid_idempotency_key")
         job_id = hashlib.sha256((client + "\0" + key).encode()).hexdigest()
+        abandoned = abandoned or asyncio.Event()
+        owner = False
         async with self.lock:
             if not self.ready or self.closing:
                 raise Rejected(503, "queue_unavailable")
@@ -351,19 +363,32 @@ class Engine:
                 job = self.jobs[job_id]
                 if job["fingerprint"] != fingerprint:
                     raise Rejected(409, "idempotency_conflict")
+                self.waiters[job_id] = self.waiters.get(job_id, 0) + 1
+                if (
+                    abandoned.is_set()
+                    and self.waiters[job_id] == 1
+                    and job["state"] == "queued"
+                ):
+                    await self.finish(job, 503, "cancelled", "not-started")
+                return job_id
+            admission = self.admissions.get(job_id)
+            if admission is not None:
+                if admission["fingerprint"] != fingerprint:
+                    raise Rejected(409, "idempotency_conflict")
             else:
                 limit = (
                     self.config.max_high
                     if priority == "high"
                     else self.config.max_normal
                 )
-                if (
-                    sum(
-                        j["state"] == "queued" and j["priority"] == priority
-                        for j in self.jobs.values()
-                    )
-                    >= limit
-                ):
+                queued = sum(
+                    j["state"] == "queued" and j["priority"] == priority
+                    for j in self.jobs.values()
+                )
+                reserved = sum(
+                    a["priority"] == priority for a in self.admissions.values()
+                )
+                if queued + reserved >= limit:
                     raise Rejected(429, "queue_full")
                 selected = parse_qs(query.decode()).get("model", [None])[0]
                 if self.config.operation == "stt" and not selected:
@@ -373,40 +398,70 @@ class Engine:
                     for i in self.instances
                 ):
                     raise Rejected(422, "no_compatible_model")
-                payload = await self.store_payload(body)
-                job = dict(
-                    id=job_id,
-                    operation=self.config.operation,
+                admission = dict(
                     fingerprint=fingerprint,
                     priority=priority,
-                    state="queued",
-                    input=payload,
-                    content_type=content_type,
-                    query=query.decode(),
-                    model=selected,
+                    owners=[],
+                    future=asyncio.get_running_loop().create_future(),
                     created=time.time(),
-                    held=False,
+                    model=selected,
                 )
-                try:
-                    await self.persist(job)
-                except BaseException:
-                    # Leave the file: an unconfirmed append may have reached Kafka.
-                    raise
-                self.jobs[job_id] = job
+                self.admissions[job_id] = admission
+                owner = True
+            # Reserve each HTTP owner before releasing the lock, including
+            # duplicates still waiting for the same durable admission.
+            admission["owners"].append(abandoned)
             self.waiters[job_id] = self.waiters.get(job_id, 0) + 1
-            if (
-                abandoned is not None
-                and abandoned.is_set()
-                and self.waiters[job_id] == 1
-                and job["state"] == "queued"
-            ):
-                await self.finish(job, 503, "cancelled", "not-started")
-            self.changed.set()
-            self.refresh()
-        return job_id
+        if not owner:
+            try:
+                return await asyncio.shield(admission["future"])
+            except asyncio.CancelledError:
+                abandoned.set()
+                await self.detach(job_id)
+                raise
+        try:
+            payload = await self.store_payload(body)
+            job = dict(
+                id=job_id,
+                operation=self.config.operation,
+                fingerprint=fingerprint,
+                priority=priority,
+                state="queued",
+                input=payload,
+                content_type=content_type,
+                query=query.decode(),
+                model=admission["model"],
+                created=admission["created"],
+                held=False,
+            )
+            async with self.lock:
+                if not self.ready or self.closing:
+                    # This file was never journaled; orphan cleanup reclaims it.
+                    self.delete_payload(payload)
+                    raise Rejected(503, "queue_unavailable")
+                await self.persist(job)
+                self.jobs[job_id] = job
+                if all(event.is_set() for event in admission["owners"]):
+                    await self.finish(job, 503, "cancelled", "not-started")
+                self.admissions.pop(job_id)
+                admission["future"].set_result(job_id)
+                self.changed.set()
+                self.refresh()
+            return job_id
+        except BaseException as error:
+            async with self.lock:
+                self.admissions.pop(job_id, None)
+                self.waiters.pop(job_id, None)
+                if not admission["future"].done():
+                    future = admission["future"]
+                    future.set_exception(error)
+                    future.exception()  # also consumed when no duplicates exist
+            # Leave unconfirmed journal writes' files for recovery.
+            raise
 
     async def response(self, job_id):
         while True:
+            snapshot = None
             async with self.lock:
                 job = self.jobs.get(job_id)
                 if job is None:
@@ -419,34 +474,65 @@ class Engine:
                     )
                 if job["state"] in ("succeeded", "failed"):
                     if job.get("output"):
-                        return (
-                            job["status"],
-                            job["response_type"],
-                            await self.blob_io(
-                                "payload_read",
-                                self.blobs.get,
-                                job["output"],
-                                self.config.max_result_bytes,
-                            ),
+                        self.readers[job_id] = self.readers.get(job_id, 0) + 1
+                        snapshot = dict(job)
+                    else:
+                        raise Rejected(
+                            job.get("status", 503),
+                            job.get("reason", "execution_failed"),
                             job.get("execution", "finished"),
                         )
-                    raise Rejected(
-                        job.get("status", 503),
-                        job.get("reason", "execution_failed"),
-                        job.get("execution", "finished"),
+                else:
+                    deadline = job.get("started", job["created"]) + (
+                        self.config.execution_timeout
+                        if job["state"] == "running"
+                        else self.config.queue_timeout
                     )
-                deadline = job.get("started", job["created"]) + (
-                    self.config.execution_timeout
-                    if job["state"] == "running"
-                    else self.config.queue_timeout
-                )
-                if time.time() >= deadline:
-                    if job["state"] == "queued":
-                        await self.finish(job, 503, "queue_timeout", "not-started")
-                        self.changed.set()
-                    else:
-                        raise Rejected(504, "execution_timeout", "uncertain")
+                    if time.time() >= deadline:
+                        if job["state"] == "queued":
+                            await self.finish(job, 503, "queue_timeout", "not-started")
+                            self.changed.set()
+                        else:
+                            raise Rejected(504, "execution_timeout", "uncertain")
+            if snapshot is not None:
+                try:
+                    data = await self.blob_io(
+                        "payload_read",
+                        self.blobs.get,
+                        snapshot["output"],
+                        self.config.max_result_bytes,
+                    )
+                    return (
+                        snapshot["status"],
+                        snapshot["response_type"],
+                        data,
+                        snapshot.get("execution", "finished"),
+                    )
+                finally:
+                    async with self.lock:
+                        self.readers[job_id] -= 1
+                        if not self.readers[job_id]:
+                            self.readers.pop(job_id)
             await asyncio.sleep(0.025)
+
+    def delete_payload(self, name):
+        if name in self.deleting:
+            return
+        self.deleting.add(name)
+
+        async def remove():
+            try:
+                await self.blob_io("payload_delete", self.blobs.remove, name)
+            except Exception:
+                # blob_io logged the safe reason and froze admission.
+                pass
+            finally:
+                self.deleting.discard(name)
+                self.refresh()
+
+        task = asyncio.create_task(remove())
+        self.cleanup_tasks.add(task)
+        task.add_done_callback(self.cleanup_tasks.discard)
 
     async def detach(self, job_id):
         async with self.lock:
@@ -472,7 +558,7 @@ class Engine:
         )
         await self.persist(job)
         if job.get("input"):
-            await self.blob_io("payload_delete", self.blobs.remove, job["input"])
+            self.delete_payload(job["input"])
         self.outcomes.labels(self.config.operation, job["priority"], reason).inc()
         self.refresh()
 
@@ -492,14 +578,13 @@ class Engine:
                             job["state"] in ("failed", "succeeded")
                             and not job.get("held")
                             and not self.waiters.get(job["id"])
+                            and not self.readers.get(job["id"])
                             and now - job["finished"] >= self.config.retention
                         ):
                             await self.persist(job, True)
                             for field in ("input", "output"):
                                 if job.get(field):
-                                    await self.blob_io(
-                                        "payload_delete", self.blobs.remove, job[field]
-                                    )
+                                    self.delete_payload(job[field])
                             self.jobs.pop(job["id"])
                             self.waiters.pop(job["id"], None)
                     pending = sorted(
@@ -592,6 +677,9 @@ class Engine:
                         # within the original queue deadline, without caching
                         # the transient refusal as a terminal result.
                         async with self.lock:
+                            if not self.waiters.get(job["id"]):
+                                await self.finish(job, 503, "cancelled", "not-started")
+                                return
                             waiting = dict(
                                 job,
                                 state="queued",
@@ -617,8 +705,8 @@ class Engine:
             status, content_type, data = result
             if len(data) > self.config.max_result_bytes:
                 raise Rejected(502, "result_too_large", "finished")
+            output = await self.store_payload(data)
             async with self.lock:
-                output = await self.store_payload(data)
                 completed = dict(
                     job,
                     state="succeeded" if 200 <= status < 300 else "failed",
@@ -630,7 +718,7 @@ class Engine:
                 )
                 await self.persist(completed)
                 job.update(completed)
-                await self.blob_io("payload_delete", self.blobs.remove, job["input"])
+                self.delete_payload(job["input"])
                 self.outcomes.labels(
                     self.config.operation,
                     job["priority"],
@@ -684,8 +772,15 @@ class Engine:
         self.changed.set()
         if self.dispatcher:
             await self.dispatcher
+        if self.admissions:
+            await asyncio.gather(
+                *(asyncio.shield(a["future"]) for a in list(self.admissions.values())),
+                return_exceptions=True,
+            )
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
+        while self.cleanup_tasks:
+            await asyncio.gather(*list(self.cleanup_tasks), return_exceptions=True)
         try:
             await self.http.aclose()
             await asyncio.to_thread(self.journal.close)
