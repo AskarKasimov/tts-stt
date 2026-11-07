@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from prometheus_client import generate_latest
 from starlette.requests import Request
@@ -152,7 +152,8 @@ class ReceiverMiddleware:
             body = bytes(body)
             message = None
             content_type = headers.get(b"content-type", "")
-            canonical = await self.validate(scope, body, content_type)
+            canonical, query = await self.validate(scope, body, content_type)
+            scope = dict(scope, query_string=query)
             if self.config.mode == "worker":
                 # A worker is private and never grows another waiting queue.
                 if self.worker_busy:
@@ -282,9 +283,12 @@ class ReceiverMiddleware:
             try:
                 data = json.loads(body)
                 self.validator(data)
-                return json.dumps(
-                    data, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                ).encode()
+                return (
+                    json.dumps(
+                        data, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                    ).encode(),
+                    scope["query_string"],
+                )
             except (ValueError, TypeError):
                 raise Rejected(422, "invalid_synthesis_request") from None
         if not content_type.startswith("multipart/form-data;"):
@@ -309,12 +313,14 @@ class ReceiverMiddleware:
                 if not audio or len(audio) > 25 * 1024**2:
                     raise ValueError()
                 model = query.get("model", [None])[0]
-                if model is not None:
-                    self.validator(model)
+                query["model"] = [self.validator(model)]
+                if not isinstance(query["model"][0], str) or not query["model"][0]:
+                    raise ValueError("model resolver must return a canonical name")
                 return (
                     (file.content_type or "application/octet-stream").encode()
                     + b"\0"
-                    + audio
+                    + audio,
+                    urlencode(sorted((k, v[0]) for k, v in query.items())).encode(),
                 )
         except Exception:
             raise Rejected(422, "invalid_transcription_request") from None

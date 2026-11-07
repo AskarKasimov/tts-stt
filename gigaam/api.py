@@ -45,7 +45,8 @@ ASR_MODELS = (
 MODEL_ALIASES = {name: f"v3_{name}" for name in ("ctc", "rnnt", "e2e_ctc", "e2e_rnnt")}
 
 
-def resolve_model_name(name: str) -> str:
+def resolve_model_name(name: str | None) -> str:
+    name = MODEL_NAME if name is None else name
     name = MODEL_ALIASES.get(name, name)
     if name not in ASR_MODELS:
         raise ValueError(f"Unsupported ASR model: {name}")

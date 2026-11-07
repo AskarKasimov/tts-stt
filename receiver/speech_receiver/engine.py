@@ -7,6 +7,8 @@ import os
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -83,6 +85,15 @@ class Blobs:
         finally:
             os.close(fd)
 
+    def check_result(self, name, maximum):
+        if self.file(name).stat().st_size > maximum:
+            raise RuntimeError("stored result exceeds configured limit")
+
+    def cleanup_orphans(self, referenced):
+        for path in self.path.glob("*.blob"):
+            if path.name not in referenced:
+                self.remove(path.name)
+
     def close(self):
         self.lock.close()
 
@@ -90,12 +101,22 @@ class Blobs:
 class Engine:
     def __init__(self, config, journal, execute):
         self.config, self.execute = config, execute
-        self.blobs = Blobs(config.data_dir, config.max_payload_bytes)
+        try:
+            self.blobs = Blobs(config.data_dir, config.max_payload_bytes)
+        except Exception as error:
+            self.log_error("payload_init", error)
+            raise
         try:
             self.journal = journal() if callable(journal) else journal
-        except BaseException:
+        except BaseException as error:
+            if not isinstance(error, asyncio.CancelledError):
+                self.log_error("journal_init", error)
             self.blobs.close()
             raise
+        self.io_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="receiver-blobs"
+        )
+        self.io_lock = asyncio.Lock()
         self.jobs, self.waiters, self.tasks = {}, {}, set()
         self.lock, self.changed, self.fatal = (
             asyncio.Lock(),
@@ -159,24 +180,64 @@ class Engine:
         self.available.set(0)
         self.fatal.set()
 
-    def store_payload(self, data):
+    def log_error(self, stage, error, job=None, instance=None):
+        fields = {
+            "event": "receiver_error",
+            "operation": self.config.operation,
+            "stage": stage,
+            "error_type": type(error).__name__,
+        }
+        if isinstance(error, OSError) and error.errno is not None:
+            fields["errno"] = error.errno
+        if job is not None:
+            fields["job_id"] = job["id"]
+        if instance is not None:
+            fields["model_instance"] = instance["id"]
+        # Exception messages/tracebacks can contain payloads, URLs or secrets.
+        logging.error(json.dumps(fields))
+
+    async def blob_io(self, stage, function, *args):
+        # A single worker serializes quota accounting. Only one filesystem call
+        # is submitted at a time, and cancellation must drain it before the
+        # state lock can be released or the volume closed.
+        async with self.io_lock:
+            future = asyncio.get_running_loop().run_in_executor(
+                self.io_pool, partial(function, *args)
+            )
+            try:
+                try:
+                    return await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    while not future.done():
+                        try:
+                            await asyncio.shield(future)
+                        except asyncio.CancelledError:
+                            continue
+                    future.result()
+                    raise
+            except Rejected as error:
+                self.log_error(stage, error)
+                raise
+            except Exception as error:
+                self.log_error(stage, error)
+                self.fail()
+                raise
+
+    async def store_payload(self, data):
         try:
-            return self.blobs.put(data)
+            return await self.blob_io("payload_write", self.blobs.put, data)
         except Rejected:
             raise
         except Exception:
             # A rename/fsync failure leaves filesystem usage uncertain.
-            # Stop accepting tasks until a restart has scanned the volume.
-            self.fail()
             raise Rejected(503, "payload_write_failed") from None
 
     async def persist(self, job, delete=False):
         try:
             await asyncio.to_thread(self.journal.append, dict(job), delete)
-        except Exception:
-            self.ready = False
-            self.available.set(0)
-            self.fatal.set()
+        except Exception as error:
+            self.log_error("journal_delete" if delete else "journal_append", error, job)
+            self.fail()
             raise Rejected(503, "durable_write_unconfirmed", "uncertain") from None
 
     async def start(self, dispatch=True):
@@ -204,11 +265,12 @@ class Engine:
                     )
                     await self.persist(job)
                 if job.get("output"):
-                    if (
-                        self.blobs.file(job["output"]).stat().st_size
-                        > self.config.max_result_bytes
-                    ):
-                        raise RuntimeError("stored result exceeds configured limit")
+                    await self.blob_io(
+                        "payload_recovery",
+                        self.blobs.check_result,
+                        job["output"],
+                        self.config.max_result_bytes,
+                    )
                 if job.get("held") and job["instance"] not in configured:
                     raise RuntimeError("held instance missing from configuration")
             for instance in self.instances:
@@ -224,15 +286,17 @@ class Engine:
                 for k in ("input", "output")
                 if j.get(k)
             }
-            for path in self.blobs.path.glob("*.blob"):
-                if path.name not in referenced:
-                    self.blobs.remove(path.name)
+            await self.blob_io(
+                "payload_recovery", self.blobs.cleanup_orphans, referenced
+            )
             self.ready = True
             self.available.set(1)
             self.refresh()
             if dispatch:
                 self.dispatcher = asyncio.create_task(self.dispatch())
-        except BaseException:
+        except BaseException as error:
+            if not isinstance(error, asyncio.CancelledError):
+                self.log_error("recovery", error)
             await self.close()
             raise
 
@@ -302,12 +366,14 @@ class Engine:
                 ):
                     raise Rejected(429, "queue_full")
                 selected = parse_qs(query.decode()).get("model", [None])[0]
+                if self.config.operation == "stt" and not selected:
+                    raise Rejected(422, "missing_resolved_model")
                 if not any(
-                    not i.get("models") or selected is None or selected in i["models"]
+                    not i.get("models") or selected in i["models"]
                     for i in self.instances
                 ):
                     raise Rejected(422, "no_compatible_model")
-                payload = self.store_payload(body)
+                payload = await self.store_payload(body)
                 job = dict(
                     id=job_id,
                     operation=self.config.operation,
@@ -356,7 +422,12 @@ class Engine:
                         return (
                             job["status"],
                             job["response_type"],
-                            self.blobs.get(job["output"], self.config.max_result_bytes),
+                            await self.blob_io(
+                                "payload_read",
+                                self.blobs.get,
+                                job["output"],
+                                self.config.max_result_bytes,
+                            ),
                             job.get("execution", "finished"),
                         )
                     raise Rejected(
@@ -401,7 +472,7 @@ class Engine:
         )
         await self.persist(job)
         if job.get("input"):
-            self.blobs.remove(job["input"])
+            await self.blob_io("payload_delete", self.blobs.remove, job["input"])
         self.outcomes.labels(self.config.operation, job["priority"], reason).inc()
         self.refresh()
 
@@ -426,11 +497,17 @@ class Engine:
                             await self.persist(job, True)
                             for field in ("input", "output"):
                                 if job.get(field):
-                                    self.blobs.remove(job[field])
+                                    await self.blob_io(
+                                        "payload_delete", self.blobs.remove, job[field]
+                                    )
                             self.jobs.pop(job["id"])
                             self.waiters.pop(job["id"], None)
                     pending = sorted(
-                        (j for j in self.jobs.values() if j["state"] == "queued"),
+                        (
+                            j
+                            for j in self.jobs.values()
+                            if j["state"] == "queued" and j.get("retry_at", 0) <= now
+                        ),
                         key=lambda j: (j["priority"] != "high", j["created"]),
                     )
                     for instance in self.instances:
@@ -444,7 +521,6 @@ class Engine:
                                 break
                             if (
                                 instance.get("models")
-                                and job["model"]
                                 and job["model"] not in instance["models"]
                             ):
                                 continue
@@ -463,18 +539,9 @@ class Engine:
                             pending.remove(job)
                             used += 1
                     self.refresh()
-            except Exception:
-                self.ready = False
-                self.available.set(0)
-                self.fatal.set()
-                logging.error(
-                    json.dumps(
-                        {
-                            "event": "receiver_unavailable",
-                            "reason": "state_transition_failed",
-                        }
-                    )
-                )
+            except Exception as error:
+                self.log_error("dispatch", error)
+                self.fail()
                 return
             try:
                 await asyncio.wait_for(self.changed.wait(), timeout=0.2)
@@ -482,8 +549,15 @@ class Engine:
                 pass
 
     async def run(self, job, instance):
+        started = job["started"]
         try:
-            body = self.blobs.get(job["input"], self.config.max_request_bytes)
+            body = await self.blob_io(
+                "payload_read",
+                self.blobs.get,
+                job["input"],
+                self.config.max_request_bytes,
+            )
+            execution = "finished"
             if instance["id"] == "local":
                 result = await self.execute(
                     body, job["content_type"], job["query"].encode()
@@ -505,11 +579,34 @@ class Engine:
                         data.extend(chunk)
                         if len(data) > self.config.max_result_bytes:
                             raise RuntimeError("result too large")
-                    if response.headers.get("x-voice-execution-state") not in (
-                        "finished",
-                        "not-started",
+                    execution = response.headers.get("x-voice-execution-state")
+                    if execution not in ("finished", "not-started") or (
+                        execution == "not-started" and response.status_code < 400
                     ):
                         raise Rejected(503, "remote_uncertain", "uncertain")
+                    if execution == "not-started" and response.status_code in (
+                        429,
+                        503,
+                    ):
+                        # No inference began: release this reservation and retry
+                        # within the original queue deadline, without caching
+                        # the transient refusal as a terminal result.
+                        async with self.lock:
+                            waiting = dict(
+                                job,
+                                state="queued",
+                                execution="not-started",
+                                retry_at=time.time() + 0.25,
+                            )
+                            waiting.pop("started", None)
+                            waiting.pop("instance", None)
+                            await self.persist(waiting)
+                            job.clear()
+                            job.update(waiting)
+                        self.outcomes.labels(
+                            self.config.operation, job["priority"], "worker_retry"
+                        ).inc()
+                        return
                     result = (
                         response.status_code,
                         response.headers.get(
@@ -521,25 +618,26 @@ class Engine:
             if len(data) > self.config.max_result_bytes:
                 raise Rejected(502, "result_too_large", "finished")
             async with self.lock:
-                output = self.store_payload(data)
+                output = await self.store_payload(data)
                 completed = dict(
                     job,
                     state="succeeded" if 200 <= status < 300 else "failed",
                     output=output,
                     status=status,
                     response_type=content_type,
-                    execution="finished",
+                    execution=execution,
                     finished=time.time(),
                 )
                 await self.persist(completed)
                 job.update(completed)
-                self.blobs.remove(job["input"])
+                await self.blob_io("payload_delete", self.blobs.remove, job["input"])
                 self.outcomes.labels(
                     self.config.operation,
                     job["priority"],
                     "success" if status < 300 else "model_error",
                 ).inc()
         except Exception as error:
+            self.log_error("execution", error, job, instance)
             async with self.lock:
                 if job["state"] in ("succeeded", "failed"):
                     # Cleanup must not overwrite a committed result.
@@ -556,11 +654,12 @@ class Engine:
                             "uncertain" if remote else "finished",
                             held=remote,
                         )
-                    except Exception:
-                        self.fatal.set()
+                    except Exception as failure:
+                        self.log_error("execution_finalize", failure, job, instance)
+                        self.fail()
         finally:
             self.duration.labels(self.config.operation, job["priority"]).observe(
-                time.time() - job["started"]
+                time.time() - started
             )
             self.refresh()
             self.changed.set()
@@ -591,4 +690,7 @@ class Engine:
             await self.http.aclose()
             await asyncio.to_thread(self.journal.close)
         finally:
-            self.blobs.close()
+            try:
+                await self.blob_io("payload_close", self.blobs.close)
+            finally:
+                await asyncio.to_thread(self.io_pool.shutdown, wait=True)

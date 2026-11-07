@@ -613,7 +613,9 @@ def test_operation_mismatch_never_replays_another_service_queue(tmp_path):
         first_config.operation = "stt"
         first = Engine(first_config, journal, execute)
         await first.start(dispatch=False)
-        job = await first.submit("dev", "normal", "same", b"audio", "audio/wav", b"")
+        job = await first.submit(
+            "dev", "normal", "same", b"audio", "audio/wav", b"model=v3_ctc"
+        )
         await first.close()
         second = Engine(config(tmp_path), journal, execute)
         with pytest.raises(RuntimeError):
@@ -621,3 +623,286 @@ def test_operation_mismatch_never_replays_another_service_queue(tmp_path):
         assert journal.records[job]["state"] == "queued"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method", ["put", "get", "remove"])
+def test_slow_blob_io_keeps_health_metrics_and_auth_responsive(
+    tmp_path, monkeypatch, method
+):
+    import threading
+
+    async def scenario():
+        entered, release = threading.Event(), threading.Event()
+        app = FastAPI()
+
+        @app.post("/synthesize")
+        async def synthesize(data: dict):
+            return Response(b"wav", media_type="audio/wav")
+
+        @app.get("/metrics")
+        async def metrics():
+            return Response(b"# model metrics\n", media_type="text/plain")
+
+        install(app, config(tmp_path), lambda _: None, MemoryJournal)
+        async with app.router.lifespan_context(app):
+            engine = app.state.receiver
+            original = getattr(engine.blobs, method)
+
+            def slow(*args):
+                entered.set()
+                assert release.wait(3), "blob operation blocked the event loop"
+                return original(*args)
+
+            monkeypatch.setattr(engine.blobs, method, slow)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                request = asyncio.create_task(
+                    client.post(
+                        "/synthesize",
+                        json={"text": "hello"},
+                        headers={"Authorization": "Bearer " + NORMAL},
+                    )
+                )
+                try:
+                    await until(entered.is_set)
+                    async with asyncio.timeout(0.5):
+                        assert (await client.get("/health/ready")).status_code == 200
+                        assert "receiver_ready 1" in (await client.get("/metrics")).text
+                        assert (
+                            await client.post("/synthesize", json={})
+                        ).status_code == 401
+                finally:
+                    release.set()
+                    assert (await request).status_code == 200
+
+    asyncio.run(scenario())
+
+
+def test_blob_cancellation_drains_writer_before_next_quota_check(tmp_path, monkeypatch):
+    import threading
+
+    async def scenario():
+        entered, release = threading.Event(), threading.Event()
+        engine = Engine(
+            config(tmp_path, max_payload_bytes=4), MemoryJournal(), lambda *_: None
+        )
+        await engine.start(dispatch=False)
+        original = engine.blobs.put
+        calls = []
+
+        def slow(data):
+            calls.append(data)
+            entered.set()
+            assert release.wait(3)
+            return original(data)
+
+        monkeypatch.setattr(engine.blobs, "put", slow)
+        first = asyncio.create_task(engine.store_payload(b"full"))
+        try:
+            await until(entered.is_set)
+            first.cancel()
+            second = asyncio.create_task(engine.store_payload(b"x"))
+            await asyncio.sleep(0.02)
+            assert calls == [b"full"] and not first.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            with pytest.raises(Rejected) as quota:
+                await second
+            assert quota.value.reason == "payload_quota"
+            assert engine.blobs.used == 4
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await engine.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_remote_not_started_retries_without_caching_temporary_refusal(tmp_path, status):
+    async def scenario():
+        cfg = config(tmp_path)
+        cfg.instances = [
+            {
+                "id": "worker",
+                "url": "http://worker/synthesize",
+                "token": HIGH,
+                "slots": 1,
+            }
+        ]
+        journal = MemoryJournal()
+        engine = Engine(cfg, journal, lambda *_: None)
+        calls = []
+
+        async def worker(_):
+            calls.append(True)
+            if len(calls) == 1:
+                return httpx.Response(
+                    status,
+                    json={"error": "worker_busy"},
+                    headers={"x-voice-execution-state": "not-started"},
+                )
+            return httpx.Response(
+                200,
+                content=b"wav",
+                headers={
+                    "x-voice-execution-state": "finished",
+                    "content-type": "audio/wav",
+                },
+            )
+
+        await engine.http.aclose()
+        engine.http = httpx.AsyncClient(transport=httpx.MockTransport(worker))
+        await engine.start()
+        try:
+            job = await engine.submit("dev", "normal", "same", b"body", "x", b"")
+            await until(lambda: engine.jobs[job].get("retry_at"))
+            assert engine.jobs[job]["state"] == "queued"
+            assert not engine.jobs[job].get("held")
+            assert journal.records[job]["execution"] == "not-started"
+            assert (await engine.response(job))[2:] == (b"wav", "finished")
+            assert (
+                await engine.submit("dev", "normal", "same", b"body", "x", b"") == job
+            )
+            assert (await engine.response(job))[2:] == (b"wav", "finished")
+            assert len(calls) == 2
+        finally:
+            await engine.close()
+
+    asyncio.run(scenario())
+
+
+def test_remote_not_started_terminal_response_is_preserved_on_replay(tmp_path):
+    async def scenario():
+        cfg = config(tmp_path)
+        cfg.instances = [
+            {
+                "id": "worker",
+                "url": "http://worker/synthesize",
+                "token": HIGH,
+                "slots": 1,
+            }
+        ]
+        journal = MemoryJournal()
+        engine = Engine(cfg, journal, lambda *_: None)
+
+        async def worker(_):
+            return httpx.Response(
+                422,
+                content=b"invalid",
+                headers={"x-voice-execution-state": "not-started"},
+            )
+
+        await engine.http.aclose()
+        engine.http = httpx.AsyncClient(transport=httpx.MockTransport(worker))
+        await engine.start()
+        try:
+            job = await engine.submit("dev", "normal", "same", b"body", "x", b"")
+            response = await engine.response(job)
+            assert response[0] == 422 and response[3] == "not-started"
+        finally:
+            await engine.close()
+        restored = Engine(cfg, journal, lambda *_: None)
+        await restored.start()
+        try:
+            assert await restored.response(job) == response
+            assert not restored.jobs[job]["held"]
+        finally:
+            await restored.close()
+
+    asyncio.run(scenario())
+
+
+def test_busy_worker_exhausts_original_queue_deadline_without_held_slot(tmp_path):
+    async def scenario():
+        cfg = config(tmp_path, queue_timeout=0.1)
+        cfg.instances = [
+            {
+                "id": "worker",
+                "url": "http://worker/synthesize",
+                "token": HIGH,
+                "slots": 1,
+            }
+        ]
+        engine = Engine(cfg, MemoryJournal(), lambda *_: None)
+
+        async def worker(_):
+            return httpx.Response(
+                429, headers={"x-voice-execution-state": "not-started"}
+            )
+
+        await engine.http.aclose()
+        engine.http = httpx.AsyncClient(transport=httpx.MockTransport(worker))
+        await engine.start()
+        try:
+            job = await engine.submit("dev", "normal", "same", b"body", "x", b"")
+            with pytest.raises(Rejected) as timeout:
+                await engine.response(job)
+            assert timeout.value.reason == "queue_timeout"
+            assert timeout.value.execution == "not-started"
+            assert not engine.jobs[job]["held"]
+        finally:
+            await engine.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["journal", "payload", "worker"])
+def test_failure_logs_safe_operation_stage_and_error_type(
+    tmp_path, monkeypatch, caplog, failure
+):
+    import json
+    import logging
+
+    caplog.set_level(logging.ERROR)
+    secret = "SECRET-request-text-and-token"
+
+    async def scenario():
+        journal = MemoryJournal()
+
+        async def execute(*_):
+            raise RuntimeError(secret)
+
+        engine = Engine(config(tmp_path), journal, execute)
+        await engine.start()
+        try:
+            if failure == "journal":
+
+                def broken(*_):
+                    raise ConnectionError(secret)
+
+                monkeypatch.setattr(journal, "append", broken)
+            elif failure == "payload":
+
+                def broken(*_):
+                    raise OSError(28, secret)
+
+                monkeypatch.setattr(engine.blobs, "put", broken)
+            if failure in ("journal", "payload"):
+                with pytest.raises(Rejected):
+                    await engine.submit("dev", "normal", "same", b"body", "x", b"")
+            else:
+                job = await engine.submit("dev", "normal", "same", b"body", "x", b"")
+                with pytest.raises(Rejected):
+                    await engine.response(job)
+        finally:
+            await engine.close()
+
+    asyncio.run(scenario())
+    records = [json.loads(record.message) for record in caplog.records]
+    stage, error_type = {
+        "journal": ("journal_append", "ConnectionError"),
+        "payload": ("payload_write", "OSError"),
+        "worker": ("execution", "RuntimeError"),
+    }[failure]
+    assert any(
+        r["operation"] == "tts"
+        and r["stage"] == stage
+        and r["error_type"] == error_type
+        for r in records
+    )
+    if failure == "payload":
+        assert any(record.get("errno") == 28 for record in records)
+    assert secret not in caplog.text
