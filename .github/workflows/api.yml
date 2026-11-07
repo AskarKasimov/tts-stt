@@ -23,5 +23,44 @@ jobs:
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: '2.0.3'
         run: uv sync --locked --only-group ci-api --no-install-project
+      - name: Install locked receiver dependencies
+        run: |
+          uv export --project ../receiver --frozen --no-dev --no-emit-project --format requirements-txt -o /tmp/receiver-requirements.txt
+          uv pip install --python .venv/bin/python --require-hashes -r /tmp/receiver-requirements.txt
+          uv pip install --python .venv/bin/python --no-deps ../receiver
       - name: Check HTTP API without model weights
         run: uv run --no-sync python -m pytest -q tests/http
+
+  receiver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - name: Start isolated Redpanda
+        run: |
+          docker run -d --name receiver-test-broker -p 127.0.0.1:19092:19092 docker.redpanda.com/redpandadata/redpanda:v26.2.4 redpanda start --mode dev-container --smp 1 --kafka-addr 0.0.0.0:19092 --advertise-kafka-addr 127.0.0.1:19092
+          for attempt in $(seq 1 30); do
+            if docker exec receiver-test-broker rpk cluster health --brokers 127.0.0.1:19092 --exit-when-healthy; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - name: Check priority, recovery, ownership and Redpanda
+        env:
+          TEST_KAFKA_BROKERS: 127.0.0.1:19092
+        run: uv run --project receiver --locked --group test python -m pytest receiver/tests observability/tests -q
+      - name: Check Compose and shell scripts
+        run: |
+          sh -n dev.sh prod.sh
+          docker compose --env-file .env.example -f docker-compose.yaml -f docker-compose.dev.yaml config --quiet
+          docker compose --env-file .env.example -f docker-compose.yaml -f docker-compose.gpu.yaml -f docker-compose.prod.yaml config --quiet
+      - name: Verify receiver packaging and model Dockerfiles
+        run: |
+          docker build --check -f gigaam/Dockerfile .
+          docker build --check -f voxcpm2/Dockerfile .
+          docker build -f receiver/Dockerfile.check -t speech-receiver-check .
+          docker run --rm --network host -e TEST_KAFKA_BROKERS=127.0.0.1:19092 speech-receiver-check
+      - name: Stop test broker
+        if: always()
+        run: docker rm -f receiver-test-broker

@@ -13,9 +13,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY . .
+COPY voxcpm2/ .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --extra api --no-editable
 
+COPY receiver /opt/receiver
+
+# Receiver dependencies are pinned separately from model dependencies.
+RUN uv export --project /opt/receiver --frozen --no-dev --no-emit-project --format requirements-txt -o /tmp/receiver-requirements.txt \
+    && uv pip install --python /app/.venv/bin/python --require-hashes -r /tmp/receiver-requirements.txt \
+    && uv pip install --python /app/.venv/bin/python --no-deps /opt/receiver
+
 EXPOSE 8000
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["python", "-m", "speech_receiver.main", "--config", "/app/config/prod.yaml"]

@@ -1,0 +1,8 @@
+# Local CPU deployment with the checked-in development-only receiver credential.
+services:
+  gigaam:
+    environment:
+      DEVICE: cpu
+  voxcpm2:
+    environment:
+      DEVICE: cpu

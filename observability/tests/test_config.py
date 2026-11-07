@@ -16,12 +16,12 @@ def test_prometheus_targets_and_interval():
 def test_dashboard_has_required_queries_and_disclaimer():
     dashboard = json.loads((ROOT / "observability/grafana/dashboards/speech-workload.json").read_text())
     raw = json.dumps(dashboard, ensure_ascii=False)
-    for value in ("speech_requests_total", "speech_audio_seconds_total", "speech_request_duration_seconds", "up", "error %", "90 дней", "GPU-часы"):
+    for value in ("speech_requests_total", "speech_audio_seconds_total", "speech_request_duration_seconds", "up", "error %", "90 дней", "GPU-часы", "receiver_queue_depth", "receiver_queue_wait_seconds", "receiver_instance_busy", "receiver_ready"):
         assert value in raw
     assert dashboard["uid"] == "speech-workload"
 
 
-def test_compose_has_loopback_grafana_and_no_gpu_monitoring():
+def test_compose_has_documented_grafana_port_and_no_gpu_monitoring():
     env = os.environ.copy()
     env["GRAFANA_ADMIN_PASSWORD"] = "test-only"
     result = subprocess.run(
@@ -30,7 +30,7 @@ def test_compose_has_loopback_grafana_and_no_gpu_monitoring():
     )
     compose = json.loads(result.stdout)
     services = compose["services"]
-    assert services["grafana"]["ports"] == [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 3000, "published": "3000", "protocol": "tcp"}]
+    assert services["grafana"]["ports"] == [{"mode": "ingress", "target": 3000, "published": "18473", "protocol": "tcp"}]
     assert "ports" not in services["prometheus"]
     assert services["prometheus"]["command"][-1] == "--storage.tsdb.retention.time=90d"
     for name in ("grafana", "prometheus"):

@@ -118,6 +118,7 @@ def create_app(
     model_loader: Callable = load_model,
     max_upload_bytes: int = MAX_UPLOAD_BYTES,
     model_cache_size: int = MODEL_CACHE_SIZE,
+    preload: bool = True,
 ) -> FastAPI:
     if model_cache_size < 1:
         raise ValueError("MODEL_CACHE_SIZE must be positive")
@@ -162,7 +163,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await asyncio.to_thread(get_model, default_model)
+        if preload:
+            await asyncio.to_thread(get_model, default_model)
         try:
             yield
         finally:

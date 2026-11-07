@@ -1,5 +1,8 @@
 # GigaAM HTTP API
 
+Compose запускает HTTP API через приёмник с Redpanda и проверкой токена. Каждый POST требует `Authorization: Bearer <токен из YAML>`. Коммитный `config/prod.yaml` содержит только публичный локальный normal-токен; серверные секреты и приоритет high настраиваются отдельно. Конфигурация, повторы, отмена и восстановление описаны в [receiver](../receiver/README.md).
+
+
 Исходники инференса [salute-developers/GigaAM](https://github.com/salute-developers/GigaAM),
 исходный коммит `7447938d791c4f3e643386ee22c33777004293a5`.
 Лицензия: [MIT](LICENSE). Сравнение моделей: [evaluation.md](evaluation.md).

@@ -1,0 +1,8 @@
+# Provision these YAML files outside Git before deployment.
+services:
+  gigaam:
+    volumes:
+      - ./deployment/gigaam/prod.yaml:/app/config/prod.yaml:ro
+  voxcpm2:
+    volumes:
+      - ./deployment/voxcpm2/prod.yaml:/app/config/prod.yaml:ro
