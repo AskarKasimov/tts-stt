@@ -42,7 +42,7 @@ jobs:
         run: |
           docker run -d --name receiver-test-broker -p 127.0.0.1:19092:19092 docker.redpanda.com/redpandadata/redpanda:v26.2.4 redpanda start --mode dev-container --smp 1 --kafka-addr 0.0.0.0:19092 --advertise-kafka-addr 127.0.0.1:19092
           for attempt in $(seq 1 30); do
-            if docker exec receiver-test-broker rpk cluster health --brokers 127.0.0.1:19092 --exit-when-healthy; then exit 0; fi
+            if docker exec receiver-test-broker rpk cluster health -X admin.hosts=127.0.0.1:9644; then exit 0; fi
             sleep 2
           done
           exit 1
