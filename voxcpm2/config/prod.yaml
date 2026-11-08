@@ -14,8 +14,8 @@ max_normal: 32
 max_payload_bytes: 2147483648
 max_request_bytes: 27262976
 max_result_bytes: 68157440
-queue_timeout: 120
-execution_timeout: 120
+queue_timeout: 250
+execution_timeout: 60
 retention: 86400
 host: 0.0.0.0
 port: 8000
