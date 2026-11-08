@@ -1075,7 +1075,8 @@ def test_slow_blob_io_does_not_hold_state_lock_for_high_admission_or_timeout(
                     "dev", "normal", "result", b"result", "x", b""
                 )
                 await engine.response(result)
-                await engine.detach(result)
+                # Keep an owner during setup: retention is only 50 ms and
+                # can otherwise delete the result before the delayed read starts.
                 target = engine.jobs[result]["output"]
             await engine.submit("dev", "normal", "hold", b"hold", "x", b"")
             await running.wait()
@@ -1104,6 +1105,10 @@ def test_slow_blob_io_does_not_hold_state_lock_for_high_admission_or_timeout(
             else:
                 slow_task = asyncio.create_task(engine.detach(deleting))
             await until(entered.is_set)
+            if stage == "get":
+                # The read is now pinned; remove the owner so the assertion
+                # below specifically tests retention protection by that read.
+                await engine.detach(result)
             async with asyncio.timeout(0.5):
                 high = await engine.submit("server", "high", "high", b"high", "x", b"")
                 assert engine.jobs[high]["priority"] == "high"
@@ -1250,5 +1255,77 @@ def test_result_quota_failure_preserves_upstream_execution_and_slot(
             assert restored.jobs[first]["held"] == (execution is None)
         finally:
             await restored.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["stt", "tts"])
+@pytest.mark.parametrize("body_failure", ["oversized", "read_error"])
+@pytest.mark.parametrize(
+    "execution,status,expected",
+    [
+        ("finished", 200, "finished"),
+        ("not-started", 422, "not-started"),
+        (None, 200, "uncertain"),
+        ("uncertain", 503, "uncertain"),
+        ("finished, not-started", 200, "uncertain"),
+        ("not-started", 200, "uncertain"),
+    ],
+)
+def test_worker_body_failure_preserves_execution_and_next_slot(
+    tmp_path, operation, body_failure, execution, status, expected
+):
+    class InterruptedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"123"
+            if body_failure == "read_error":
+                raise httpx.ReadError("simulated read failure")
+            yield b"456"
+
+    async def scenario():
+        cfg = config(tmp_path, max_result_bytes=4)
+        cfg.operation = operation
+        query = b"model=v3_ctc" if operation == "stt" else b""
+        cfg.instances = [
+            {"id": "worker", "url": "http://worker/model", "token": HIGH, "slots": 1}
+        ]
+        journal = MemoryJournal()
+        engine = Engine(cfg, journal, lambda *_: None)
+        calls = []
+
+        async def worker(_):
+            calls.append(True)
+            if len(calls) == 1:
+                headers = (
+                    {} if execution is None else {"x-voice-execution-state": execution}
+                )
+                return httpx.Response(status, headers=headers, stream=InterruptedBody())
+            return httpx.Response(
+                200, content=b"ok", headers={"x-voice-execution-state": "finished"}
+            )
+
+        await engine.http.aclose()
+        engine.http = httpx.AsyncClient(transport=httpx.MockTransport(worker))
+        await engine.start()
+        try:
+            first = await engine.submit("dev", "normal", "first", b"in", "x", query)
+            with pytest.raises(Rejected) as failure:
+                await engine.response(first)
+            assert failure.value.execution == expected
+            held = expected == "uncertain"
+            assert engine.jobs[first]["held"] == held
+            assert journal.records[first]["execution"] == expected
+            assert journal.records[first]["held"] == held
+            second = await engine.submit("dev", "normal", "second", b"in", "x", query)
+            if held:
+                await asyncio.sleep(0.025)
+                assert engine.jobs[second]["state"] == "queued"
+                assert len(calls) == 1
+            else:
+                assert (await engine.response(second))[2:] == (b"ok", "finished")
+                assert len(calls) == 2
+            assert engine.ready
+        finally:
+            await engine.close()
 
     asyncio.run(scenario())

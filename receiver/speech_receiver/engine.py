@@ -662,17 +662,19 @@ class Engine:
                         "Content-Type": job["content_type"],
                     },
                 ) as response:
-                    data = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        data.extend(chunk)
-                        if len(data) > self.config.max_result_bytes:
-                            raise RuntimeError("result too large")
                     execution = response.headers.get("x-voice-execution-state")
                     if execution not in ("finished", "not-started") or (
                         execution == "not-started" and response.status_code < 400
                     ):
                         raise Rejected(503, "remote_uncertain", "uncertain")
+                    # The worker's execution state is independent of whether
+                    # its response body can be read or fits the result limit.
                     upstream_execution = execution
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        data.extend(chunk)
+                        if len(data) > self.config.max_result_bytes:
+                            raise RuntimeError("result too large")
                     if execution == "not-started" and response.status_code in (
                         429,
                         503,
