@@ -1185,3 +1185,70 @@ def test_concurrent_pending_admissions_share_idempotency_and_reserve_queue_limit
             await engine.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["stt", "tts"])
+@pytest.mark.parametrize("execution", ["finished", "not-started", None])
+def test_result_quota_failure_preserves_upstream_execution_and_slot(
+    tmp_path, operation, execution
+):
+    async def scenario():
+        cfg = config(tmp_path, max_payload_bytes=5)
+        cfg.operation = operation
+        cfg.instances = [
+            {"id": "worker", "url": "http://worker/model", "token": HIGH, "slots": 1}
+        ]
+        query = b"model=v3_ctc" if operation == "stt" else b""
+        journal = MemoryJournal()
+        engine = Engine(cfg, journal, lambda *_: None)
+        calls = []
+
+        async def worker(_):
+            calls.append(True)
+            if len(calls) == 1:
+                # Input (2) fits, but input + result (2 + 5) exceeds quota.
+                headers = (
+                    {} if execution is None else {"x-voice-execution-state": execution}
+                )
+                return httpx.Response(
+                    422 if execution == "not-started" else 200,
+                    content=b"large",
+                    headers=headers,
+                )
+            return httpx.Response(
+                200, content=b"ok", headers={"x-voice-execution-state": "finished"}
+            )
+
+        await engine.http.aclose()
+        engine.http = httpx.AsyncClient(transport=httpx.MockTransport(worker))
+        await engine.start()
+        try:
+            first = await engine.submit("dev", "normal", "first", b"in", "x", query)
+            expected = execution or "uncertain"
+            with pytest.raises(Rejected) as failure:
+                await engine.response(first)
+            assert failure.value.execution == expected
+            assert engine.jobs[first]["held"] == (execution is None)
+            assert journal.records[first]["execution"] == expected
+            assert journal.records[first]["held"] == (execution is None)
+            assert engine.ready
+            if execution is not None:
+                await until(lambda: engine.blobs.used == 0)
+                second = await engine.submit(
+                    "dev", "normal", "second", b"in", "x", query
+                )
+                assert (await engine.response(second))[2:] == (b"ok", "finished")
+                assert len(calls) == 2
+        finally:
+            await engine.close()
+        restored = Engine(cfg, journal, lambda *_: None)
+        await restored.start(dispatch=False)
+        try:
+            with pytest.raises(Rejected) as replay:
+                await restored.response(first)
+            assert replay.value.execution == expected
+            assert restored.jobs[first]["held"] == (execution is None)
+        finally:
+            await restored.close()
+
+    asyncio.run(scenario())

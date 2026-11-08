@@ -635,6 +635,9 @@ class Engine:
 
     async def run(self, job, instance):
         started = job["started"]
+        # Storage failures describe the receiver, not whether the model is
+        # still executing. Keep the upstream's confirmed state independently.
+        upstream_execution = "finished" if instance["id"] == "local" else "uncertain"
         try:
             body = await self.blob_io(
                 "payload_read",
@@ -669,6 +672,7 @@ class Engine:
                         execution == "not-started" and response.status_code < 400
                     ):
                         raise Rejected(503, "remote_uncertain", "uncertain")
+                    upstream_execution = execution
                     if execution == "not-started" and response.status_code in (
                         429,
                         503,
@@ -731,16 +735,13 @@ class Engine:
                     # Cleanup must not overwrite a committed result.
                     self.fail()
                 elif self.ready:
-                    remote = instance["id"] != "local" and not (
-                        isinstance(error, Rejected) and error.execution == "finished"
-                    )
                     try:
                         await self.finish(
                             job,
                             503,
                             "execution_failed",
-                            "uncertain" if remote else "finished",
-                            held=remote,
+                            upstream_execution,
+                            held=upstream_execution == "uncertain",
                         )
                     except Exception as failure:
                         self.log_error("execution_finalize", failure, job, instance)
