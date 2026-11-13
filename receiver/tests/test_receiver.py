@@ -22,14 +22,15 @@ def test_committed_clients_assign_production_high_and_development_normal(service
     cfg = load(root / service / "config/prod.yaml")
     other = "voxcpm2" if service == "gigaam" else "gigaam"
     other_cfg = load(root / other / "config/prod.yaml")
-    assert cfg.clients == other_cfg.clients
-    assert cfg.clients["production"]["token"] != cfg.clients["development"]["token"]
+    clients_match = cfg.clients == other_cfg.clients
+    assert clients_match, "STT and TTS must register the same clients"
+    tokens_differ = cfg.clients["production"]["token"] != cfg.clients["development"]["token"]
+    assert tokens_differ, "Production and development must use distinct tokens"
     for client, priority in (("production", "high"), ("development", "normal")):
-        assert cfg.authenticate("Bearer " + cfg.clients[client]["token"]) == (
-            client,
-            priority,
-        )
-    assert cfg.authenticate("Bearer unknown-client") is None
+        identity = cfg.authenticate("Bearer " + cfg.clients[client]["token"])
+        assert identity == (client, priority)
+    unknown_identity = cfg.authenticate("Bearer unknown-client")
+    assert unknown_identity is None
 
 
 class MemoryJournal:
