@@ -1,0 +1,8 @@
+# Both receiver clients are configured for the trusted LAN in the versioned YAML.
+services:
+  gigaam:
+    volumes:
+      - ./gigaam/config/prod.yaml:/app/config/prod.yaml:ro
+  voxcpm2:
+    volumes:
+      - ./voxcpm2/config/prod.yaml:/app/config/prod.yaml:ro

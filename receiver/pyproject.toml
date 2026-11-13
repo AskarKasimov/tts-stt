@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speech-receiver"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["confluent-kafka>=2.6,<3", "PyYAML>=6,<7", "httpx>=0.28,<1", "python-multipart>=0.0.20", "prometheus-client>=0.21", "uvicorn>=0.30"]
+
+[dependency-groups]
+test = ["pytest>=8", "fastapi==0.141.1", "starlette==1.7.0", "numpy", "soundfile"]
+
+[tool.setuptools.packages.find]
+include = ["speech_receiver*"]

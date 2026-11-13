@@ -4,3 +4,10 @@ __pycache__/
 .venv/
 *.egg-info/
 .env
+
+# Server credentials and runtime state
+deployment/
+
+# Local Python wheel build artifacts
+receiver/build/
+receiver/dist/

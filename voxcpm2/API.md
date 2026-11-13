@@ -1,5 +1,8 @@
 # VoxCPM2 HTTP API
 
+Compose запускает HTTP API через приёмник с Redpanda и проверкой токена. Каждый POST требует `Authorization: Bearer <токен из YAML>`. Коммитный `config/prod.yaml` содержит только публичный локальный normal-токен; серверные секреты и приоритет high настраиваются отдельно. Конфигурация, повторы, отмена и восстановление описаны в [receiver](../receiver/README.md).
+
+
 Этот сервис использует исходный код [OpenBMB/VoxCPM](https://github.com/OpenBMB/VoxCPM)
 из коммита `f772e498a45fbb5fb8e13fbf9b9c48be9fe33e69`. На Linux ARM64
 образ использует CPU-версию PyTorch, на Linux x86_64 — сборку CUDA 12.8.

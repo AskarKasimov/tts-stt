@@ -1,0 +1,24 @@
+operation: stt
+mode: queued
+data_dir: /var/lib/speech-receiver
+brokers:
+- redpanda:9092
+topic: speech.stt.state.v1
+clients:
+  production:
+    token: 3938b24fe6f54ddeb733ac353177de6dd256c1301c2220ab
+    priority: high
+  development:
+    token: local-development-client-token-0001
+    priority: normal
+instances: []
+max_high: 32
+max_normal: 32
+max_payload_bytes: 2147483648
+max_request_bytes: 27262976
+max_result_bytes: 68157440
+queue_timeout: 25
+execution_timeout: 5
+retention: 86400
+host: 0.0.0.0
+port: 8000

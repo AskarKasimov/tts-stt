@@ -45,7 +45,8 @@ ASR_MODELS = (
 MODEL_ALIASES = {name: f"v3_{name}" for name in ("ctc", "rnnt", "e2e_ctc", "e2e_rnnt")}
 
 
-def resolve_model_name(name: str) -> str:
+def resolve_model_name(name: str | None) -> str:
+    name = MODEL_NAME if name is None else name
     name = MODEL_ALIASES.get(name, name)
     if name not in ASR_MODELS:
         raise ValueError(f"Unsupported ASR model: {name}")
@@ -118,6 +119,7 @@ def create_app(
     model_loader: Callable = load_model,
     max_upload_bytes: int = MAX_UPLOAD_BYTES,
     model_cache_size: int = MODEL_CACHE_SIZE,
+    preload: bool = True,
 ) -> FastAPI:
     if model_cache_size < 1:
         raise ValueError("MODEL_CACHE_SIZE must be positive")
@@ -162,7 +164,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await asyncio.to_thread(get_model, default_model)
+        if preload:
+            await asyncio.to_thread(get_model, default_model)
         try:
             yield
         finally:

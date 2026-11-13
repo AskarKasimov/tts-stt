@@ -1,23 +1,48 @@
 services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.4
+    command: ["redpanda", "start", "--mode", "dev-container", "--smp", "1", "--memory", "512M", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "redpanda:9092"]
+    volumes:
+      - receiver-redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy", "--brokers", "localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
   gigaam:
-    build: ./gigaam
+    build:
+      context: .
+      dockerfile: gigaam/Dockerfile
+    depends_on:
+      redpanda:
+        condition: service_healthy
     environment:
       MODEL_NAME: v3_e2e_rnnt
       MODEL_CACHE_SIZE: ${MODEL_CACHE_SIZE:-2}
       DEVICE: cpu
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
+      - stt-receiver-data:/var/lib/speech-receiver
+      - ./gigaam/config/prod.yaml:/app/config/prod.yaml:ro
       - gigaam-cache:/root/.cache/gigaam
       - gigaam-vad-cache:/root/.cache/huggingface
     ports:
       - "8000:8000"
     restart: unless-stopped
   voxcpm2:
-    build: ./voxcpm2
+    build:
+      context: .
+      dockerfile: voxcpm2/Dockerfile
+    depends_on:
+      redpanda:
+        condition: service_healthy
     environment:
       MODEL_ID: openbmb/VoxCPM2
       DEVICE: cpu
     volumes:
+      - tts-receiver-data:/var/lib/speech-receiver
+      - ./voxcpm2/config/prod.yaml:/app/config/prod.yaml:ro
       - voxcpm2-cache:/model-cache
     ports:
       - "8001:8000"
@@ -51,6 +76,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  receiver-redpanda-data:
+  stt-receiver-data:
+  tts-receiver-data:
   gigaam-cache:
   gigaam-vad-cache:
   voxcpm2-cache:
