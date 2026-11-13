@@ -5,5 +5,7 @@ WORKDIR /work
 COPY receiver/pyproject.toml receiver/uv.lock /work/receiver/
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --project receiver --locked --group test --no-install-project
 COPY receiver /work/receiver
+COPY gigaam/config/prod.yaml /work/gigaam/config/prod.yaml
+COPY voxcpm2/config/prod.yaml /work/voxcpm2/config/prod.yaml
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --project receiver --locked --group test --no-editable --refresh-package speech-receiver
 CMD ["receiver/.venv/bin/python", "-m", "pytest", "receiver/tests", "-q"]
