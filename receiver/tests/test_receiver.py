@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import os
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,6 +14,22 @@ from speech_receiver.journal import KafkaJournal
 
 HIGH = "server-secret-for-tests-00000001"
 NORMAL = "developer-secret-for-tests-00001"
+
+
+@pytest.mark.parametrize("service", ["gigaam", "voxcpm2"])
+def test_committed_clients_assign_production_high_and_development_normal(service):
+    root = Path(__file__).resolve().parents[2]
+    cfg = load(root / service / "config/prod.yaml")
+    other = "voxcpm2" if service == "gigaam" else "gigaam"
+    other_cfg = load(root / other / "config/prod.yaml")
+    assert cfg.clients == other_cfg.clients
+    assert cfg.clients["production"]["token"] != cfg.clients["development"]["token"]
+    for client, priority in (("production", "high"), ("development", "normal")):
+        assert cfg.authenticate("Bearer " + cfg.clients[client]["token"]) == (
+            client,
+            priority,
+        )
+    assert cfg.authenticate("Bearer unknown-client") is None
 
 
 class MemoryJournal:

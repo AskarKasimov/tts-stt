@@ -1,8 +1,8 @@
-# Provision these YAML files outside Git before deployment.
+# Both receiver clients are configured for the trusted LAN in the versioned YAML.
 services:
   gigaam:
     volumes:
-      - ./deployment/gigaam/prod.yaml:/app/config/prod.yaml:ro
+      - ./gigaam/config/prod.yaml:/app/config/prod.yaml:ro
   voxcpm2:
     volumes:
-      - ./deployment/voxcpm2/prod.yaml:/app/config/prod.yaml:ro
+      - ./voxcpm2/config/prod.yaml:/app/config/prod.yaml:ro

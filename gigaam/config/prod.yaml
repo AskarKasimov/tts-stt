@@ -5,6 +5,9 @@ brokers:
 - redpanda:9092
 topic: speech.stt.state.v1
 clients:
+  production:
+    token: 3938b24fe6f54ddeb733ac353177de6dd256c1301c2220ab
+    priority: high
   development:
     token: local-development-client-token-0001
     priority: normal

@@ -52,7 +52,8 @@ jobs:
         run: uv run --project receiver --locked --group test python -m pytest receiver/tests observability/tests -q
       - name: Check Compose and shell scripts
         run: |
-          sh -n dev.sh prod.sh
+          sh -n dev.sh
+          sh -n prod.sh
           docker compose --env-file .env.example -f docker-compose.yaml -f docker-compose.dev.yaml config --quiet
           docker compose --env-file .env.example -f docker-compose.yaml -f docker-compose.gpu.yaml -f docker-compose.prod.yaml config --quiet
       - name: Verify receiver packaging and model Dockerfiles
